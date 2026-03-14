@@ -103,7 +103,7 @@ public class ToolInvoker {
                 : SkillRequest.RetryPolicy.defaultPolicy();
 
         return executor.validate(tool, request.input())
-                .then(executor.execute(tool, request.input(), context))
+                .then(Mono.defer(() -> executor.execute(tool, request.input(), context)))
                 .timeout(Duration.ofMillis(timeoutMs))
                 .retryWhen(Retry.backoff(
                         retryPolicy.maxAttempts(),
