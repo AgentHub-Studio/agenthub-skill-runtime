@@ -2,14 +2,21 @@ package dev.cezar.agenthub.skillruntime.resolver;
 
 import dev.cezar.agenthub.skillruntime.domain.Skill;
 import dev.cezar.agenthub.skillruntime.domain.Tool;
+import dev.cezar.agenthub.skillruntime.resolver.dto.SkillResponse;
+import dev.cezar.agenthub.skillruntime.resolver.dto.SkillToolBinding;
+import dev.cezar.agenthub.skillruntime.resolver.dto.ToolResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.data.domain.Page;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -105,46 +112,114 @@ public class SkillResolver {
 
     /**
      * Busca skill por slug no backend.
+     * <p>
+     * Nota: Backend não possui endpoint direto para buscar por slug,
+     * então fazemos query de todas as skills e filtramos em memória.
+     * </p>
      */
     private Mono<Skill> findSkillBySlug(UUID tenantId, String skillSlug) {
-        // TODO: Implementar chamada real ao backend
-        // GET /api/skills?slug={skillSlug}
+        log.debug("Fetching skill by slug from backend: slug={}", skillSlug);
         
-        log.warn("Using placeholder skill resolution (backend integration pending)");
-        
-        // Placeholder: retorna skill fictícia
-        return Mono.just(new Skill(
-                UUID.randomUUID(),
-                skillSlug,
-                "Placeholder Skill",
-                "PLACEHOLDER",
-                "Placeholder skill for testing",
-                "ACTIVE",
-                java.util.Map.of()
-        ));
+        return backendClient.get()
+                .uri(uriBuilder -> uriBuilder
+                        .path("/api/skills")
+                        .queryParam("size", 1000)
+                        .build())
+                .header("X-Tenant-ID", tenantId.toString())
+                .retrieve()
+                .bodyToMono(new ParameterizedTypeReference<Page<SkillResponse>>() {})
+                .flatMapMany(page -> Flux.fromIterable(page.getContent()))
+                .filter(skill -> skillSlug.equals(skill.slug()))
+                .next()
+                .map(this::toSkillDomain)
+                .switchIfEmpty(Mono.error(new SkillResolutionException(
+                        "Skill not found: " + skillSlug)));
     }
 
     /**
      * Busca tools vinculadas a uma skill no backend.
+     * <p>
+     * Fluxo:
+     * 1. GET /api/skills/{skillId}/tools → lista de SkillToolBinding (toolId + priority)
+     * 2. Para cada toolId, GET /api/tools/{toolId} → ToolResponse completo
+     * 3. Merge binding + tool → Tool domain
+     * </p>
      */
     private Mono<List<Tool>> findToolsForSkill(UUID tenantId, UUID skillId) {
-        // TODO: Implementar chamada real ao backend
-        // GET /api/skills/{skillId}/tools
+        log.debug("Fetching tools for skill from backend: skillId={}", skillId);
         
-        log.warn("Using placeholder tool resolution (backend integration pending)");
-        
-        // Placeholder: retorna tool fictícia baseada no tipo inferido do slug
-        Tool placeholderTool = new Tool(
-                UUID.randomUUID(),
-                skillId,
-                "Placeholder Tool",
-                "PLACEHOLDER",
-                java.util.Map.of(),
-                1,
-                "ACTIVE"
+        return backendClient.get()
+                .uri("/api/skills/{skillId}/tools", skillId)
+                .header("X-Tenant-ID", tenantId.toString())
+                .retrieve()
+                .bodyToFlux(SkillToolBinding.class)
+                .flatMap(binding -> fetchToolDetails(tenantId, binding))
+                .collectList();
+    }
+
+    /**
+     * Busca detalhes completos de uma tool e combina com binding.
+     */
+    private Mono<Tool> fetchToolDetails(UUID tenantId, SkillToolBinding binding) {
+        return backendClient.get()
+                .uri("/api/tools/{toolId}", binding.toolId())
+                .header("X-Tenant-ID", tenantId.toString())
+                .retrieve()
+                .bodyToMono(ToolResponse.class)
+                .map(toolResponse -> toToolDomain(toolResponse, binding));
+    }
+
+    /**
+     * Converte SkillResponse do backend para Skill domain.
+     */
+    private Skill toSkillDomain(SkillResponse response) {
+        return new Skill(
+                response.id(),
+                response.slug(),
+                response.name(),
+                response.category(),
+                response.description(),
+                response.status(),
+                Map.of(
+                        "version", response.version(),
+                        "inputSchema", response.inputSchema(),
+                        "outputSchema", response.outputSchema()
+                )
         );
+    }
+
+    /**
+     * Converte ToolResponse + SkillToolBinding para Tool domain.
+     */
+    private Tool toToolDomain(ToolResponse response, SkillToolBinding binding) {
+        // Mapear tipo do backend para tipo do executor
+        String executorType = mapToolTypeToExecutorType(response.type());
         
-        return Mono.just(List.of(placeholderTool));
+        return new Tool(
+                response.id(),
+                binding.skillId(),
+                response.name(),
+                executorType,
+                response.config() != null ? response.config() : Map.of(),
+                binding.priority(),
+                "ACTIVE"  // Tools retornadas pelo binding são consideradas ativas
+        );
+    }
+
+    /**
+     * Mapeia tipo de tool do backend para tipo de executor.
+     * <p>
+     * Backend: CODE, DATABASE, DOCUMENTS, BLOCKLY
+     * Runtime: HTTP, SQL, DOCUMENT_SEARCH, MCP, SCRIPT
+     * </p>
+     */
+    private String mapToolTypeToExecutorType(String backendType) {
+        return switch (backendType) {
+            case "DATABASE" -> "SQL";
+            case "DOCUMENTS" -> "DOCUMENT_SEARCH";
+            case "CODE" -> "SCRIPT";
+            default -> backendType;  // HTTP, MCP mantêm o nome
+        };
     }
 
     /**
