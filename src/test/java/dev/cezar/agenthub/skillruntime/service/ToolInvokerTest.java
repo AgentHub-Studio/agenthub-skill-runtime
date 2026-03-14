@@ -6,6 +6,7 @@ import dev.cezar.agenthub.skillruntime.domain.Tool;
 import dev.cezar.agenthub.skillruntime.executor.ToolExecutor;
 import dev.cezar.agenthub.skillruntime.executor.ToolExecutorRegistry;
 import dev.cezar.agenthub.skillruntime.resolver.SkillResolver;
+import dev.cezar.agenthub.skillruntime.validator.SkillValidator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -39,6 +40,9 @@ class ToolInvokerTest {
     @Mock
     private ToolExecutor mockExecutor;
 
+    @Mock
+    private SkillValidator skillValidator;
+
     private ToolInvoker toolInvoker;
 
     private UUID tenantId;
@@ -47,7 +51,11 @@ class ToolInvokerTest {
 
     @BeforeEach
     void setUp() {
-        toolInvoker = new ToolInvoker(skillResolver, executorRegistry);
+        toolInvoker = new ToolInvoker(skillResolver, executorRegistry, skillValidator);
+        
+        // Mock skillValidator para sempre passar (sem schema para validar)
+        // Usa lenient() para permitir que nem todos os testes usem este stub
+        lenient().when(skillValidator.validateInput(any(), any())).thenReturn(Mono.empty());
 
         tenantId = UUID.randomUUID();
         skillSlug = "test-skill";

@@ -2,10 +2,13 @@ package dev.cezar.agenthub.skillruntime.service;
 
 import dev.cezar.agenthub.skillruntime.api.SkillRequest;
 import dev.cezar.agenthub.skillruntime.api.SkillResponse;
+import dev.cezar.agenthub.skillruntime.domain.Skill;
 import dev.cezar.agenthub.skillruntime.domain.Tool;
 import dev.cezar.agenthub.skillruntime.executor.ToolExecutor;
 import dev.cezar.agenthub.skillruntime.executor.ToolExecutorRegistry;
+import dev.cezar.agenthub.skillruntime.resolver.ResolvedSkill;
 import dev.cezar.agenthub.skillruntime.resolver.SkillResolver;
+import dev.cezar.agenthub.skillruntime.validator.SkillValidator;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -21,10 +24,11 @@ import java.util.UUID;
  * <p>
  * Fluxo de execução:
  * 1. Resolve skill → tool (via SkillResolver)
- * 2. Busca executor apropriado (via ToolExecutorRegistry)
- * 3. Valida inputs
- * 4. Executa tool com timeout e retry
- * 5. Retorna resultado
+ * 2. Valida input contra inputSchema da skill (via SkillValidator)
+ * 3. Busca executor apropriado (via ToolExecutorRegistry)
+ * 4. Valida inputs específicos da tool (via ToolExecutor.validate)
+ * 5. Executa tool com timeout e retry
+ * 6. Retorna resultado
  * </p>
  *
  * @since 1.0.0
@@ -36,6 +40,7 @@ public class ToolInvoker {
 
     private final SkillResolver skillResolver;
     private final ToolExecutorRegistry executorRegistry;
+    private final SkillValidator skillValidator;
 
     /**
      * Invoca uma skill de forma síncrona (bloqueia até completar).
@@ -50,8 +55,19 @@ public class ToolInvoker {
         log.info("Invoking skill: executionId={}, tenantId={}, skillSlug={}",
                 executionId, request.tenantId(), request.skillSlug());
 
-        return resolveTool(request)
-                .flatMap(tool -> executeToolWithRetry(tool, request, executionId, startTime))
+        return resolveSkillAndTool(request)
+                .flatMap(resolved -> 
+                    // Valida input contra schema da skill
+                    skillValidator.validateInput(resolved.skill(), request.input())
+                        .then(Mono.just(resolved))
+                )
+                .flatMap(resolved -> executeToolWithRetry(
+                        resolved.skill(),
+                        resolved.tool(),
+                        request,
+                        executionId,
+                        startTime
+                ))
                 .onErrorResume(error -> {
                     long latency = System.currentTimeMillis() - startTime;
                     log.error("Skill invocation failed: executionId={}, error={}",
@@ -67,8 +83,43 @@ public class ToolInvoker {
     }
 
     /**
-     * Resolve skill para tool concreta.
+     * Resolve skill e tool concreta.
+     * Retorna tanto a Skill (para validação de schema) quanto a Tool (para execução).
      */
+    private Mono<ResolvedSkill> resolveSkillAndTool(SkillRequest request) {
+        // Por enquanto, vamos buscar a skill do backend junto com a resolução
+        // TODO: Implementar método no SkillResolver que retorna Skill completa
+        // Por agora, criar Skill placeholder a partir da Tool
+        
+        Mono<Tool> toolMono;
+        if (request.skillId() != null) {
+            toolMono = skillResolver.resolveById(request.tenantId(), request.skillId());
+        } else {
+            toolMono = skillResolver.resolveBySlug(request.tenantId(), request.skillSlug());
+        }
+        
+        return toolMono.map(tool -> {
+            // Cria Skill placeholder (sem schema por enquanto - será ignorado pelo validator)
+            // Quando SkillResolver retornar Skill completa, usaremos o schema real
+            Skill skill = new Skill(
+                    tool.skillId(),
+                    request.skillSlug(),
+                    request.skillSlug(),
+                    "UNKNOWN",
+                    "Skill for " + request.skillSlug(),
+                    "ACTIVE",
+                    Map.of() // Sem schema por enquanto
+            );
+            
+            return new ResolvedSkill(skill, tool);
+        });
+    }
+
+    /**
+     * Resolve skill para tool concreta (método legado).
+     * @deprecated Use resolveSkillAndTool() para ter acesso ao schema
+     */
+    @Deprecated
     private Mono<Tool> resolveTool(SkillRequest request) {
         if (request.skillId() != null) {
             return skillResolver.resolveById(request.tenantId(), request.skillId());
@@ -81,6 +132,7 @@ public class ToolInvoker {
      * Executa tool com retry, timeout e tratamento de erros.
      */
     private Mono<SkillResponse> executeToolWithRetry(
+            Skill skill,
             Tool tool,
             SkillRequest request,
             UUID executionId,
