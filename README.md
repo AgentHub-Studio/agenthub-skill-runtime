@@ -7,12 +7,18 @@
 
 ## 📋 Descrição
 
-O **Skill Runtime** é responsável por:
-- Resolver skills para implementações concretas (tools)
-- Executar tools (HTTP, SQL, Document Search, MCP, etc.)
-- Gerenciar tool executors
-- Validar e sanitizar inputs/outputs
-- Registrar execuções de tools
+O **Skill Runtime** é um motor de execução reativo que resolve e executa tools com validação, retry e timeout.
+
+### Features
+
+- ✅ **JSON Schema Validation**: Validação automática de inputs/outputs contra schemas das skills
+- ✅ **Retry Policy**: Exponential backoff configurável (até 10 tentativas)
+- ✅ **Timeout Control**: Timeout por request (padrão: 30s)
+- ✅ **Multi-tenancy**: Isolamento via `tenantId` header propagation
+- ✅ **100% Reactive**: Spring WebFlux + R2DBC (non-blocking)
+- ✅ **5 Tool Types**: HTTP, SQL, DOCUMENT_SEARCH, SCRIPT, MCP
+- ✅ **OpenAPI 3.0**: Documentação completa com Swagger UI
+- ✅ **Observability**: Actuator + Prometheus metrics
 
 ## 🏗️ Arquitetura
 
@@ -64,38 +70,103 @@ mvn spring-boot:run
 | MCP_CLIENT_URL | URL do MCP client (Go) | http://localhost:9001 |
 | POSTGRES_URL | PostgreSQL para document search | jdbc:postgresql://localhost:5432/agenthub |
 
-## 📚 API Principal
+## 📚 API Documentation
 
-### POST /api/v1/tools/invoke
-Invoca uma tool.
+### Swagger UI / OpenAPI
+
+Acesse a documentação interativa completa da API:
+
+**Local:** http://localhost:8082/swagger-ui.html  
+**Docker:** http://agenthub-skill-runtime:8082/swagger-ui.html
+
+A documentação OpenAPI inclui:
+- ✅ Schemas completos de request/response
+- ✅ Exemplos para todos os tool types (HTTP, SQL, DOCUMENT_SEARCH, SCRIPT, MCP)
+- ✅ Try-it-out interativo
+- ✅ Descrição detalhada de erros (400, 404, 500)
+- ✅ JSON Schema validation examples
+
+### API Endpoints
+
+#### POST /api/v1/skills/invoke
+Invoca uma skill com validação, retry e timeout.
 
 **Request:**
 ```json
 {
-  "tenantId": "uuid",
+  "tenantId": "123e4567-e89b-12d3-a456-426614174000",
   "skillSlug": "document-search",
   "input": {
-    "query": "contratos de 2025",
-    "knowledgeBaseId": "uuid",
-    "limit": 10
+    "query": "What is AgentHub architecture?",
+    "limit": 5,
+    "threshold": 0.7
+  },
+  "executionContext": {
+    "agentId": "agent-001",
+    "userId": "user-001",
+    "executionId": "exec-001",
+    "nodeId": "node-search-1"
+  },
+  "timeout": 5000,
+  "retryPolicy": {
+    "maxAttempts": 3,
+    "backoffMs": 1000,
+    "backoffMultiplier": 2.0
   }
 }
 ```
 
-**Response:**
+**Response (Success):**
 ```json
 {
-  "executionId": "uuid",
+  "executionId": "550e8400-e29b-41d4-a716-446655440000",
+  "skillSlug": "document-search",
+  "toolId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
   "success": true,
   "result": {
     "documents": [
       {
-        "content": "...",
+        "id": "doc-123",
+        "content": "AgentHub architecture overview...",
         "score": 0.95
       }
     ]
   },
-  "latencyMs": 150
+  "error": null,
+  "metadata": {
+    "toolType": "DOCUMENT_SEARCH",
+    "executionTimeMs": 245
+  },
+  "latencyMs": 250,
+  "executedAt": "2026-03-14T10:30:00Z"
+}
+```
+
+**Response (Error):**
+```json
+{
+  "executionId": "550e8400-e29b-41d4-a716-446655440000",
+  "skillSlug": "document-search",
+  "toolId": null,
+  "success": false,
+  "result": {},
+  "error": "Input validation failed: $.query: is missing but it is required",
+  "metadata": {},
+  "latencyMs": 5,
+  "executedAt": "2026-03-14T10:30:00Z"
+}
+```
+
+#### GET /api/v1/skills/health
+Health check endpoint.
+
+**Response:**
+```json
+{
+  "status": "UP",
+  "service": "agenthub-skill-runtime",
+  "supportedToolTypes": ["HTTP", "SQL", "DOCUMENT_SEARCH", "SCRIPT", "MCP"],
+  "timestamp": "2026-03-14T10:30:00Z"
 }
 ```
 
