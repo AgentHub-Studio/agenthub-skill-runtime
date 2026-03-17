@@ -1,0 +1,18 @@
+services:
+  agenthub-skill-runtime:
+    build: .
+    container_name: agenthub-skill-runtime
+    restart: unless-stopped
+    ports:
+      - "8083:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+    networks:
+      agenthub-shared-net:
+        aliases:
+          - agenthub.skill-runtime.internal
+
+networks:
+  agenthub-shared-net:
+    external: true
+    name: agenthub-shared-net
