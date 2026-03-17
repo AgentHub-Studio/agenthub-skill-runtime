@@ -1,6 +1,7 @@
 package dev.cezar.agenthub.skillruntime.executor;
 
 import dev.cezar.agenthub.skillruntime.domain.Tool;
+import dev.cezar.agenthub.skillruntime.multitenant.MultiTenant;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.r2dbc.core.DatabaseClient;
@@ -155,8 +156,8 @@ public class DocumentSearchToolExecutor implements ToolExecutor {
         // Converte array para formato pgvector
         String vectorStr = formatVector(queryEmbedding);
 
-        // Schema do tenant
-        String schema = "ah_" + tenantId.replace("-", "_");
+        // Schema do tenant (UUID hyphens must be preserved)
+        String schema = MultiTenant.SCHEMA_PREFIX + tenantId;
 
         // Query pgvector com cosine similarity
         String sql = String.format("""

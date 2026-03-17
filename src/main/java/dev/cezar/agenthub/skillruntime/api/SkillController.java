@@ -1,6 +1,8 @@
 package dev.cezar.agenthub.skillruntime.api;
 
 import dev.cezar.agenthub.skillruntime.executor.ToolExecutorRegistry;
+import dev.cezar.agenthub.skillruntime.multitenant.TenantContext;
+import dev.cezar.agenthub.skillruntime.multitenant.TenantContextHolder;
 import dev.cezar.agenthub.skillruntime.service.ToolInvoker;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -296,10 +298,15 @@ public class SkillController {
         )
     )
     public Mono<SkillResponse> invokeSkill(@Valid @org.springframework.web.bind.annotation.RequestBody SkillRequest request) {
-        log.info("Invoking skill: tenantId={}, skillSlug={}", 
-                request.tenantId(), request.skillSlug());
-
-        return toolInvoker.invoke(request);
+        log.info("Invoking skill: tenantId={}, skillSlug={}", request.tenantId(), request.skillSlug());
+        String tenantId = request.tenantId().toString();
+        TenantContext tc = new TenantContext(tenantId);
+        return toolInvoker.invoke(request)
+                .contextWrite(TenantContextHolder.withTenantContext(tc))
+                .contextWrite(ctx -> {
+                    var c = ctx.put("schema", tc.getSchemaName()).put("tenantId", tc.getTenantId());
+                    return c;
+                });
     }
 
     /**
