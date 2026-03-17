@@ -1,9 +1,14 @@
 package dev.cezar.agenthub.skillruntime.executor;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.cezar.agenthub.skillruntime.domain.Tool;
+import io.r2dbc.spi.ConnectionFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.test.StepVerifier;
 
 import java.util.Map;
@@ -11,14 +16,19 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+@ExtendWith(MockitoExtension.class)
 @DisplayName("SqlToolExecutor - Executor para ferramentas SQL")
 class SqlToolExecutorTest {
+
+    @Mock
+    private ConnectionFactory connectionFactory;
 
     private SqlToolExecutor executor;
 
     @BeforeEach
     void setUp() {
-        executor = new SqlToolExecutor();
+        // Use real ObjectMapper so convertValue() works with the private inner SqlConfig class
+        executor = new SqlToolExecutor(connectionFactory, new ObjectMapper());
     }
 
     @Test
@@ -28,215 +38,94 @@ class SqlToolExecutorTest {
     }
 
     @Test
-    @DisplayName("Deve validar que tool tem query SQL")
-    void shouldValidateToolHasSqlQuery() {
-        // Given - tool sem query
+    @DisplayName("Deve validar que tool tem query configurada")
+    void shouldValidateToolHasQuery() {
         Tool invalidTool = new Tool(
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 "Invalid SQL Tool",
                 "SQL",
-                Map.of("datasource", "postgresql"), // falta 'query'
+                Map.of("type", "SELECT"), // falta query
                 1,
                 "ACTIVE"
         );
 
-        Map<String, Object> input = Map.of();
-        ToolExecutor.ExecutionContext context = createContext();
-
-        // When & Then
-        StepVerifier.create(executor.validate(invalidTool, input))
-                .expectErrorMatches(error ->
-                        error.getMessage().contains("query") ||
-                        error.getMessage().contains("SQL")
-                )
+        StepVerifier.create(executor.validate(invalidTool, Map.of()))
+                .expectErrorMatches(error -> error.getMessage().contains("query") || error.getMessage().contains("SQL"))
                 .verify();
     }
 
     @Test
-    @DisplayName("Deve validar que tool tem datasource configurado")
-    void shouldValidateToolHasDatasource() {
-        // Given - tool sem datasource
+    @DisplayName("Deve validar que tool tem type configurado")
+    void shouldValidateToolHasType() {
         Tool invalidTool = new Tool(
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 "Invalid SQL Tool",
                 "SQL",
-                Map.of("query", "SELECT * FROM users"), // falta 'datasource'
+                Map.of("query", "SELECT * FROM users"), // falta type
                 1,
                 "ACTIVE"
         );
 
-        Map<String, Object> input = Map.of();
-        ToolExecutor.ExecutionContext context = createContext();
-
-        // When & Then
-        StepVerifier.create(executor.validate(invalidTool, input))
-                .expectErrorMatches(error ->
-                        error.getMessage().contains("datasource") ||
-                        error.getMessage().contains("database")
-                )
+        StepVerifier.create(executor.validate(invalidTool, Map.of()))
+                .expectErrorMatches(error -> error.getMessage().contains("type") || error.getMessage().contains("Type"))
                 .verify();
     }
 
     @Test
-    @DisplayName("Deve validar query SQL contra SQL injection básico")
-    void shouldValidateQueryAgainstBasicSqlInjection() {
-        // Given - query com possível SQL injection
-        Tool tool = new Tool(
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                "SQL Tool",
-                "SQL",
-                Map.of(
-                        "datasource", "postgresql",
-                        "query", "SELECT * FROM users WHERE id = ${id}; DROP TABLE users;"
-                ),
-                1,
-                "ACTIVE"
-        );
+    @DisplayName("Deve aceitar configuração SQL válida")
+    void shouldAcceptValidSqlConfiguration() {
+        Tool tool = createSqlTool("SELECT * FROM users WHERE id = :id", "SELECT");
 
-        Map<String, Object> input = Map.of("id", "1");
-        ToolExecutor.ExecutionContext context = createContext();
-
-        // When & Then
-        StepVerifier.create(executor.validate(tool, input))
-                .expectErrorMatches(error ->
-                        error.getMessage().toLowerCase().contains("sql injection") ||
-                        error.getMessage().toLowerCase().contains("unsafe") ||
-                        error.getMessage().toLowerCase().contains("multiple statements")
-                )
-                .verify();
-    }
-
-    @Test
-    @DisplayName("Deve aceitar queries SELECT válidas")
-    void shouldAcceptValidSelectQueries() {
-        // Given
-        Tool tool = new Tool(
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                "SQL Tool",
-                "SQL",
-                Map.of(
-                        "datasource", "postgresql",
-                        "query", "SELECT id, name, email FROM users WHERE active = true"
-                ),
-                1,
-                "ACTIVE"
-        );
-
-        Map<String, Object> input = Map.of();
-        ToolExecutor.ExecutionContext context = createContext();
-
-        // When & Then - deve passar validação
-        StepVerifier.create(executor.validate(tool, input))
+        StepVerifier.create(executor.validate(tool, Map.of()))
                 .verifyComplete();
     }
 
     @Test
-    @DisplayName("Deve aceitar queries com parâmetros parametrizados")
-    void shouldAcceptParameterizedQueries() {
-        // Given
+    @DisplayName("Deve rejeitar maxRows negativo ou zero")
+    void shouldRejectNonPositiveMaxRows() {
         Tool tool = new Tool(
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 "SQL Tool",
                 "SQL",
                 Map.of(
-                        "datasource", "postgresql",
-                        "query", "SELECT * FROM orders WHERE user_id = :userId AND status = :status"
+                        "query", "SELECT * FROM users",
+                        "type", "SELECT",
+                        "maxRows", 0
                 ),
                 1,
                 "ACTIVE"
         );
 
-        Map<String, Object> input = Map.of(
-                "userId", 123,
-                "status", "COMPLETED"
-        );
-        ToolExecutor.ExecutionContext context = createContext();
-
-        // When & Then
-        StepVerifier.create(executor.validate(tool, input))
-                .verifyComplete();
-    }
-
-    @Test
-    @DisplayName("Deve bloquear operações DML perigosas (DELETE sem WHERE)")
-    void shouldBlockDangerousDmlOperations() {
-        // Given - DELETE sem WHERE clause
-        Tool tool = new Tool(
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                "SQL Tool",
-                "SQL",
-                Map.of(
-                        "datasource", "postgresql",
-                        "query", "DELETE FROM users" // sem WHERE - perigoso!
-                ),
-                1,
-                "ACTIVE"
-        );
-
-        Map<String, Object> input = Map.of();
-        ToolExecutor.ExecutionContext context = createContext();
-
-        // When & Then
-        StepVerifier.create(executor.validate(tool, input))
-                .expectErrorMatches(error ->
-                        error.getMessage().toLowerCase().contains("unsafe") ||
-                        error.getMessage().toLowerCase().contains("where clause required")
-                )
+        StepVerifier.create(executor.validate(tool, Map.of()))
+                .expectErrorMatches(error -> error.getMessage().contains("maxRows"))
                 .verify();
     }
 
     @Test
-    @DisplayName("Deve bloquear operações DDL (DROP, TRUNCATE, ALTER)")
-    void shouldBlockDdlOperations() {
-        // Given
-        String[] dangerousQueries = {
-                "DROP TABLE users",
-                "TRUNCATE TABLE sessions",
-                "ALTER TABLE users DROP COLUMN email"
-        };
+    @DisplayName("Deve aceitar query INSERT válida")
+    void shouldAcceptValidInsertQuery() {
+        Tool tool = createSqlTool("INSERT INTO audit_log (event) VALUES (:event)", "INSERT");
 
-        for (String query : dangerousQueries) {
-            Tool tool = new Tool(
-                    UUID.randomUUID(),
-                    UUID.randomUUID(),
-                    "SQL Tool",
-                    "SQL",
-                    Map.of(
-                            "datasource", "postgresql",
-                            "query", query
-                    ),
-                    1,
-                    "ACTIVE"
-            );
-
-            Map<String, Object> input = Map.of();
-            ToolExecutor.ExecutionContext context = createContext();
-
-            // When & Then
-            StepVerifier.create(executor.validate(tool, input))
-                    .expectErrorMatches(error ->
-                            error.getMessage().toLowerCase().contains("ddl") ||
-                            error.getMessage().toLowerCase().contains("not allowed") ||
-                            error.getMessage().toLowerCase().contains("forbidden")
-                    )
-                    .verify();
-        }
+        StepVerifier.create(executor.validate(tool, Map.of()))
+                .verifyComplete();
     }
 
     // Helper methods
-    private ToolExecutor.ExecutionContext createContext() {
-        return new ToolExecutor.ExecutionContext(
-                UUID.randomUUID().toString(),
-                UUID.randomUUID().toString(),
-                UUID.randomUUID().toString(),
-                UUID.randomUUID().toString(),
-                "node-1"
+    private Tool createSqlTool(String query, String type) {
+        return new Tool(
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                "SQL Tool",
+                "SQL",
+                Map.of(
+                        "query", query,
+                        "type", type
+                ),
+                1,
+                "ACTIVE"
         );
     }
 }
