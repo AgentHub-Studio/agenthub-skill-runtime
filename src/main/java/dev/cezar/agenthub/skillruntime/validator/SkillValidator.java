@@ -7,7 +7,6 @@ import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
 import dev.cezar.agenthub.skillruntime.domain.Skill;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -33,9 +32,8 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class SkillValidator {
-    
+
     private final ObjectMapper objectMapper;
     private final JsonSchemaFactory schemaFactory;
     
