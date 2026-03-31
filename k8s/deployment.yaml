@@ -1,0 +1,60 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agenthub-skill-runtime
+  namespace: agenthub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agenthub-skill-runtime
+  template:
+    metadata:
+      labels:
+        app: agenthub-skill-runtime
+    spec:
+      containers:
+        - name: skill-runtime
+          image: localhost:5000/agenthub-skill-runtime:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8083
+          env:
+            - name: SERVER_PORT
+              value: "8083"
+            - name: SPRING_PROFILES_ACTIVE
+              value: dev
+            - name: AGENTHUB_BACKEND_URL
+              value: http://agenthub-backend.agenthub.svc.cluster.local:8081
+            - name: SPRING_R2DBC_URL
+              value: r2dbc:postgresql://postgres.agenthub.svc.cluster.local:5432/agenthub
+            - name: SPRING_R2DBC_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: agenthub-secrets
+                  key: POSTGRES_USER
+            - name: SPRING_R2DBC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agenthub-secrets
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: 200m
+              memory: 384Mi
+            limits:
+              cpu: 800m
+              memory: 768Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agenthub-skill-runtime
+  namespace: agenthub
+spec:
+  selector:
+    app: agenthub-skill-runtime
+  ports:
+    - port: 8083
+      targetPort: 8083
