@@ -1,0 +1,12 @@
+bin/
+coverage.out
+*.test
+**/*_test.go
+.idea/
+.vscode/
+*.swp
+.git/
+.gitignore
+*.md
+docs/
+.github/
