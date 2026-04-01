@@ -18,8 +18,12 @@ type Config struct {
 	// (0 = no retries).
 	MaxRetries int
 
-	// RetryDelay is the base wait duration between retries.
+	// RetryDelay is the base wait duration for the first retry.
+	// Subsequent retries use exponential backoff: RetryDelay * 2^attempt.
 	RetryDelay time.Duration
+
+	// MaxRetryDelay caps the exponential backoff delay (0 = uncapped).
+	MaxRetryDelay time.Duration
 
 	// Timeout is the per-attempt deadline (0 = no timeout beyond ctx).
 	Timeout time.Duration
@@ -34,6 +38,7 @@ func DefaultConfig() Config {
 	return Config{
 		MaxRetries:              2,
 		RetryDelay:              200 * time.Millisecond,
+		MaxRetryDelay:           5 * time.Second,
 		Timeout:                 30 * time.Second,
 		CircuitBreakerThreshold: 5,
 	}
@@ -80,16 +85,30 @@ func (inv *ToolInvoker) Invoke(ctx context.Context, ec executor.ExecutionContext
 		}
 
 		if attempt < inv.cfg.MaxRetries {
+			delay := inv.backoffDelay(attempt)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(inv.cfg.RetryDelay):
+			case <-time.After(delay):
 			}
 		}
 	}
 
 	inv.failures.Add(1)
 	return nil, fmt.Errorf("invoker: all %d attempt(s) failed: %w", attempts, err)
+}
+
+// backoffDelay returns the exponential back-off delay for the given attempt index (0-based).
+// delay = RetryDelay * 2^attempt, capped at MaxRetryDelay when non-zero.
+func (inv *ToolInvoker) backoffDelay(attempt int) time.Duration {
+	delay := inv.cfg.RetryDelay
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+	}
+	if inv.cfg.MaxRetryDelay > 0 && delay > inv.cfg.MaxRetryDelay {
+		return inv.cfg.MaxRetryDelay
+	}
+	return delay
 }
 
 // attemptOnce performs a single execution with an optional per-attempt timeout.
