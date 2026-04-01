@@ -56,11 +56,14 @@ func New(exec executor.ToolExecutor, cfg Config) *ToolInvoker {
 
 // Invoke executes the tool, applying timeout per attempt and retrying on
 // transient errors. Returns ErrCircuitOpen when the circuit breaker trips.
+// Sets LatencyMs on the returned Result to reflect total wall-clock time.
 func (inv *ToolInvoker) Invoke(ctx context.Context, ec executor.ExecutionContext) (*executor.Result, error) {
 	if inv.cfg.CircuitBreakerThreshold > 0 &&
 		inv.failures.Load() >= int64(inv.cfg.CircuitBreakerThreshold) {
 		return nil, ErrCircuitOpen
 	}
+
+	start := time.Now()
 
 	var (
 		result *executor.Result
@@ -72,6 +75,7 @@ func (inv *ToolInvoker) Invoke(ctx context.Context, ec executor.ExecutionContext
 		result, err = inv.attemptOnce(ctx, ec)
 		if err == nil {
 			inv.failures.Store(0) // reset on success
+			result.LatencyMs = time.Since(start).Milliseconds()
 			return result, nil
 		}
 

@@ -96,7 +96,10 @@ func (s *Server) executeTool(w http.ResponseWriter, r *http.Request, tool *execu
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result.Output)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"output":    result.Output,
+		"latencyMs": result.LatencyMs,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
