@@ -39,9 +39,10 @@ type docSearchConfig struct {
 
 // searchResult represents a single matched chunk returned to the caller.
 type searchResult struct {
-	Content  string         `json:"content"`
-	Score    float64        `json:"score"`
-	Metadata map[string]any `json:"metadata"`
+	Content      string  `json:"content"`
+	Score        float64 `json:"score"`
+	DocumentID   string  `json:"documentId"`
+	DocumentName string  `json:"documentName"`
 }
 
 // Execute queries the embedding service and searches the knowledge base with pgvector.
@@ -100,7 +101,7 @@ func (e *DocumentSearchToolExecutor) searchChunks(
 	vectorLiteral := float32SliceToVector(embedding)
 
 	sql := fmt.Sprintf(`
-		SELECT dc.content, dc.metadata, 1 - (dce.embedding <=> $1::vector) AS score
+		SELECT dc.content, d.file_name, d.id::text, 1 - (dce.embedding <=> $1::vector) AS score
 		FROM %s.document_chunk dc
 		JOIN %s.document_chunk_embedding dce ON dce.chunk_id = dc.id
 		JOIN %s.document d ON d.id = dc.document_id
@@ -119,12 +120,8 @@ func (e *DocumentSearchToolExecutor) searchChunks(
 	var results []searchResult
 	for rows.Next() {
 		var r searchResult
-		var metaRaw []byte
-		if err := rows.Scan(&r.Content, &metaRaw, &r.Score); err != nil {
+		if err := rows.Scan(&r.Content, &r.DocumentName, &r.DocumentID, &r.Score); err != nil {
 			return nil, fmt.Errorf("scan row: %w", err)
-		}
-		if len(metaRaw) > 0 {
-			_ = json.Unmarshal(metaRaw, &r.Metadata)
 		}
 		results = append(results, r)
 	}
