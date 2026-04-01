@@ -22,6 +22,8 @@ type Result struct {
 	Output map[string]any
 	// Error describes the failure reason when execution was unsuccessful.
 	Error string
+	// LatencyMs is the total execution time in milliseconds, set by ToolInvoker.
+	LatencyMs int64
 }
 
 // ToolExecutor executes a specific type of tool.

@@ -181,3 +181,12 @@ func TestInvoker_ContextCancelledDuringRetryDelay(t *testing.T) {
 	assert.True(t, errors.Is(err, context.DeadlineExceeded) || stub.callCount < 4,
 		"expected context cancellation to cut retries short")
 }
+
+func TestInvoker_LatencyIsPopulated(t *testing.T) {
+	exec := &stubExecutor{result: &executor.Result{Output: map[string]any{"ok": true}}}
+	inv := invoker.New(exec, invoker.Config{Timeout: time.Second})
+
+	result, err := inv.Invoke(context.Background(), executor.ExecutionContext{})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, result.LatencyMs, int64(0), "LatencyMs should be set")
+}
