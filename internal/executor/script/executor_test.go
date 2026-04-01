@@ -82,3 +82,48 @@ func TestScriptExecutor_RuntimeError(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+func TestScriptExecutor_Timeout(t *testing.T) {
+	e := &script.ScriptToolExecutor{}
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"script":     `while(true){}`,
+			"timeout_ms": 50,
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "runtime error")
+}
+
+func TestScriptExecutor_ConsoleLog(t *testing.T) {
+	e := &script.ScriptToolExecutor{}
+	res, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{"script": `console.log("hello", "world"); "done"`},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "done", res.Output["result"])
+	assert.Contains(t, res.Output["logs"], "hello world")
+}
+
+func TestScriptExecutor_NoLogsKey_WhenNoConsoleLog(t *testing.T) {
+	e := &script.ScriptToolExecutor{}
+	res, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{"script": `1 + 1`},
+	})
+	require.NoError(t, err)
+	_, hasLogs := res.Output["logs"]
+	assert.False(t, hasLogs, "logs key should not be present when console.log is not called")
+}
+
+func TestScriptExecutor_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e := &script.ScriptToolExecutor{}
+	_, err := e.Execute(ctx, executor.ExecutionContext{
+		Config: map[string]any{
+			"script":     `while(true){}`,
+			"timeout_ms": 5000,
+		},
+	})
+	require.Error(t, err)
+}
