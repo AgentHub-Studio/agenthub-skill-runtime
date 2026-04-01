@@ -182,6 +182,75 @@ func TestInvoker_ContextCancelledDuringRetryDelay(t *testing.T) {
 		"expected context cancellation to cut retries short")
 }
 
+func TestInvoker_ExponentialBackoffDelayGrows(t *testing.T) {
+	// Track when each Execute call happens to verify growing delays.
+	var callTimes []time.Time
+	stub := &customStub{
+		onExecute: func() (*executor.Result, error) {
+			callTimes = append(callTimes, time.Now())
+			if len(callTimes) < 3 {
+				return nil, errors.New("transient")
+			}
+			return &executor.Result{Output: map[string]any{"ok": true}}, nil
+		},
+	}
+	cfg := invoker.Config{
+		MaxRetries:    2,
+		RetryDelay:    10 * time.Millisecond,
+		MaxRetryDelay: 1 * time.Second,
+		Timeout:       5 * time.Second,
+	}
+	inv := invoker.New(stub, cfg)
+	_, err := inv.Invoke(context.Background(), ec())
+	require.NoError(t, err)
+	require.Len(t, callTimes, 3)
+
+	// delay0 = 10ms (base), delay1 = 20ms (2x base)
+	// Each gap between calls should be >= the expected delay.
+	gap0 := callTimes[1].Sub(callTimes[0])
+	gap1 := callTimes[2].Sub(callTimes[1])
+	assert.GreaterOrEqual(t, gap0, 10*time.Millisecond, "first retry gap should be >= base delay")
+	assert.GreaterOrEqual(t, gap1, gap0, "second retry gap should be >= first (exponential growth)")
+}
+
+func TestInvoker_ExponentialBackoffCappedByMaxRetryDelay(t *testing.T) {
+	calls := 0
+	stub := &customStub{
+		onExecute: func() (*executor.Result, error) {
+			calls++
+			if calls < 4 {
+				return nil, errors.New("transient")
+			}
+			return &executor.Result{Output: map[string]any{"ok": true}}, nil
+		},
+	}
+	cfg := invoker.Config{
+		MaxRetries:    3,
+		RetryDelay:    100 * time.Millisecond,
+		MaxRetryDelay: 150 * time.Millisecond, // caps at 150ms even though 2x200ms = 400ms
+		Timeout:       5 * time.Second,
+	}
+	start := time.Now()
+	inv := invoker.New(stub, cfg)
+	_, err := inv.Invoke(context.Background(), ec())
+	require.NoError(t, err)
+	// 3 retries, all capped at 150ms → total ≤ 3*150ms + overhead = 450ms + overhead
+	// Without cap it would be 100+200+400 = 700ms
+	elapsed := time.Since(start)
+	assert.Less(t, elapsed, 600*time.Millisecond, "backoff should be capped, total should be much less than uncapped 700ms")
+}
+
+// customStub is a ToolExecutor backed by a callback.
+type customStub struct {
+	toolType  string
+	onExecute func() (*executor.Result, error)
+}
+
+func (s *customStub) GetToolType() string { return s.toolType }
+func (s *customStub) Execute(_ context.Context, _ executor.ExecutionContext) (*executor.Result, error) {
+	return s.onExecute()
+}
+
 func TestInvoker_LatencyIsPopulated(t *testing.T) {
 	exec := &stubExecutor{result: &executor.Result{Output: map[string]any{"ok": true}}}
 	inv := invoker.New(exec, invoker.Config{Timeout: time.Second})
