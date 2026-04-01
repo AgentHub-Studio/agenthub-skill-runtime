@@ -10,6 +10,11 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-skill-runtime/internal/config"
 	"github.com/AgentHub-Studio/agenthub-skill-runtime/internal/executor"
+	"github.com/AgentHub-Studio/agenthub-skill-runtime/internal/executor/docsearch"
+	exechttp "github.com/AgentHub-Studio/agenthub-skill-runtime/internal/executor/http"
+	"github.com/AgentHub-Studio/agenthub-skill-runtime/internal/executor/mcp"
+	"github.com/AgentHub-Studio/agenthub-skill-runtime/internal/executor/script"
+	"github.com/AgentHub-Studio/agenthub-skill-runtime/internal/executor/sql"
 	"github.com/AgentHub-Studio/agenthub-skill-runtime/internal/middleware"
 )
 
@@ -23,9 +28,16 @@ type Server struct {
 
 // New creates a new Server with all routes mounted.
 func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
+	reg := executor.NewRegistry()
+	reg.Register(&exechttp.HTTPToolExecutor{})
+	reg.Register(sql.NewSQLToolExecutor(pool))
+	reg.Register(docsearch.NewDocumentSearchToolExecutor(pool))
+	reg.Register(mcp.NewMCPToolExecutor(pool))
+	reg.Register(&script.ScriptToolExecutor{})
+
 	s := &Server{
 		pool:     pool,
-		registry: executor.NewRegistry(),
+		registry: reg,
 		resolver: executor.NewSkillResolver(pool),
 	}
 
