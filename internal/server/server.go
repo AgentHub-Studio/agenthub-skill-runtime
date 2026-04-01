@@ -46,6 +46,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
 
+	// CORS at root level so OPTIONS preflight is handled before chi returns 405.
+	r.Use(chain.CORSHandler())
+	r.Options("/*", func(w http.ResponseWriter, r *http.Request) {})
+
 	// Health endpoints — no auth required.
 	r.Get("/health", s.handleHealth)
 	r.Get("/ready", s.handleReady)
