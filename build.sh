@@ -1,9 +1,43 @@
-#!/bin/bash
-MAVEN_IMAGE="maven:3.9.12-amazoncorretto-25"
-
-docker run --rm \
-  -v "$(pwd)":/app \
-  -v "$HOME/.m2":/root/.m2 \
-  -w /app \
-  ${MAVEN_IMAGE} \
-  mvn "$@"
+#!/usr/bin/env bash
+set -euo pipefail
+GO_IMAGE="golang:1.24-alpine"
+CACHE_VOL="$HOME/go/pkg/mod"
+CMD="${1:-help}"
+shift || true
+case "$CMD" in
+  compile)
+    docker run --rm \
+      -v "$(pwd)":/app \
+      -v "${CACHE_VOL}":/go/pkg/mod \
+      -w /app \
+      "${GO_IMAGE}" go build ./...
+    ;;
+  test)
+    docker run --rm \
+      -v "$(pwd)":/app \
+      -v "${CACHE_VOL}":/go/pkg/mod \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -w /app \
+      "${GO_IMAGE}" go test -v -race -coverprofile=coverage.out ./... "$@"
+    ;;
+  package)
+    docker build -t "agenthub-studio/agenthub-skill-runtime:local" .
+    ;;
+  lint)
+    docker run --rm \
+      -v "$(pwd)":/app \
+      -v "${CACHE_VOL}":/go/pkg/mod \
+      -w /app \
+      golangci/golangci-lint:latest golangci-lint run ./...
+    ;;
+  tidy)
+    docker run --rm \
+      -v "$(pwd)":/app \
+      -v "${CACHE_VOL}":/go/pkg/mod \
+      -w /app \
+      "${GO_IMAGE}" go mod tidy
+    ;;
+  *)
+    echo "Usage: ./build.sh <compile|test|package|lint|tidy>"
+    ;;
+esac
