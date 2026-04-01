@@ -18,11 +18,17 @@ type Config struct {
 	// (0 = no retries).
 	MaxRetries int
 
-	// RetryDelay is the base wait duration for the first retry.
-	// Subsequent retries use exponential backoff: RetryDelay * 2^attempt.
+	// RetryDelay is the base wait duration for the first retry interval.
+	// Subsequent intervals are multiplied by RetryDelayMultiplier.
 	RetryDelay time.Duration
 
-	// MaxRetryDelay caps the exponential backoff delay (0 = uncapped).
+	// RetryDelayMultiplier is the exponential growth factor applied to RetryDelay
+	// between successive retries (e.g. 2.0 = doubles each time).
+	// Values <= 1.0 disable the multiplier (constant delay).
+	RetryDelayMultiplier float64
+
+	// MaxRetryDelay caps the computed exponential delay.
+	// 0 means no cap beyond RetryDelay.
 	MaxRetryDelay time.Duration
 
 	// Timeout is the per-attempt deadline (0 = no timeout beyond ctx).
@@ -33,15 +39,33 @@ type Config struct {
 	CircuitBreakerThreshold int
 }
 
-// DefaultConfig returns sensible defaults.
+// DefaultConfig returns sensible defaults with exponential backoff.
 func DefaultConfig() Config {
 	return Config{
 		MaxRetries:              2,
 		RetryDelay:              200 * time.Millisecond,
-		MaxRetryDelay:           5 * time.Second,
+		RetryDelayMultiplier:    2.0,
+		MaxRetryDelay:           30 * time.Second,
 		Timeout:                 30 * time.Second,
 		CircuitBreakerThreshold: 5,
 	}
+}
+
+// RetryDelayForAttempt returns the backoff duration for the given attempt index (0-based).
+// It applies exponential growth capped at MaxRetryDelay.
+func (c Config) RetryDelayForAttempt(attempt int) time.Duration {
+	if attempt == 0 || c.RetryDelayMultiplier <= 1.0 {
+		return c.RetryDelay
+	}
+	delay := float64(c.RetryDelay)
+	for i := 0; i < attempt; i++ {
+		delay *= c.RetryDelayMultiplier
+	}
+	d := time.Duration(delay)
+	if c.MaxRetryDelay > 0 && d > c.MaxRetryDelay {
+		return c.MaxRetryDelay
+	}
+	return d
 }
 
 // ErrCircuitOpen is returned when the circuit breaker is open.
@@ -85,30 +109,16 @@ func (inv *ToolInvoker) Invoke(ctx context.Context, ec executor.ExecutionContext
 		}
 
 		if attempt < inv.cfg.MaxRetries {
-			delay := inv.backoffDelay(attempt)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(delay):
+			case <-time.After(inv.cfg.RetryDelayForAttempt(attempt)):
 			}
 		}
 	}
 
 	inv.failures.Add(1)
 	return nil, fmt.Errorf("invoker: all %d attempt(s) failed: %w", attempts, err)
-}
-
-// backoffDelay returns the exponential back-off delay for the given attempt index (0-based).
-// delay = RetryDelay * 2^attempt, capped at MaxRetryDelay when non-zero.
-func (inv *ToolInvoker) backoffDelay(attempt int) time.Duration {
-	delay := inv.cfg.RetryDelay
-	for i := 0; i < attempt; i++ {
-		delay *= 2
-	}
-	if inv.cfg.MaxRetryDelay > 0 && delay > inv.cfg.MaxRetryDelay {
-		return inv.cfg.MaxRetryDelay
-	}
-	return delay
 }
 
 // attemptOnce performs a single execution with an optional per-attempt timeout.
