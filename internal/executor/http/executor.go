@@ -15,27 +15,40 @@ import (
 // HTTPToolExecutor executes HTTP tool calls using URL templates.
 //
 // Config fields (from tool.config JSONB):
-//   - url: string (supports {{input.fieldName}} templates)
+//   - url: string (supports {key} and {{input.key}} templates)
 //   - method: string (GET, POST, PUT, DELETE, PATCH)
-//   - headers: map[string]string (supports {{input.fieldName}} templates)
-//   - body_template: string (JSON template with {{input.fieldName}})
+//   - headers: map[string]string
+//   - body_template: string (JSON template with {key} or {{input.key}})
 //   - timeout_seconds: int (default 30)
-//   - auth_type: string (none, bearer, basic, oauth2)
-//   - auth_token: string (for bearer/basic)
-type HTTPToolExecutor struct{}
+//   - auth_type: string (none, bearer, basic)
+//   - auth_token: string (static token for bearer/basic)
+//   - useCallerToken: bool (forward the caller's JWT as Authorization: Bearer)
+type HTTPToolExecutor struct {
+	// backendBaseURL is prepended to relative URLs (starting with /).
+	backendBaseURL string
+}
+
+// NewHTTPToolExecutor creates an HTTPToolExecutor with the given backend base URL.
+// The base URL is used for relative tool URLs (e.g. /api/skills → http://agenthub-api:8081/api/skills).
+func NewHTTPToolExecutor(backendBaseURL string) *HTTPToolExecutor {
+	return &HTTPToolExecutor{backendBaseURL: backendBaseURL}
+}
 
 // GetToolType returns the tool type identifier.
 func (e *HTTPToolExecutor) GetToolType() string { return "HTTP" }
 
 // httpConfig holds parsed configuration for an HTTP tool.
 type httpConfig struct {
-	URL            string            `json:"url"`
-	Method         string            `json:"method"`
-	Headers        map[string]string `json:"headers"`
-	BodyTemplate   string            `json:"body_template"`
-	TimeoutSeconds int               `json:"timeout_seconds"`
-	AuthType       string            `json:"auth_type"`
-	AuthToken      string            `json:"auth_token"`
+	URL             string            `json:"url"`
+	URLTemplate     string            `json:"urlTemplate"` // alias used by some tool configs
+	Method          string            `json:"method"`
+	Headers         map[string]string `json:"headers"`
+	BodyTemplate    string            `json:"body_template"`
+	TimeoutSeconds  int               `json:"timeout_seconds"`
+	AuthType        string            `json:"auth_type"`
+	AuthToken       string            `json:"auth_token"`
+	UseCallerToken  bool              `json:"useCallerToken"`
+	BaseURL         string            `json:"baseUrl"` // optional base URL prefix
 }
 
 // Execute performs the HTTP request described in ec.Config using values from ec.Input.
@@ -45,8 +58,23 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 		return nil, fmt.Errorf("http executor: parse config: %w", err)
 	}
 
-	if cfg.URL == "" {
+	// Resolve URL: prefer cfg.URL, fallback to cfg.URLTemplate.
+	rawURL := cfg.URL
+	if rawURL == "" {
+		rawURL = cfg.URLTemplate
+	}
+	if rawURL == "" {
 		return nil, fmt.Errorf("http executor: url is required")
+	}
+	// Prepend base URL for relative paths: use tool config baseUrl first, then executor default.
+	if !strings.HasPrefix(rawURL, "http") {
+		base := cfg.BaseURL
+		if base == "" {
+			base = e.backendBaseURL
+		}
+		if base != "" {
+			rawURL = strings.TrimRight(base, "/") + rawURL
+		}
 	}
 
 	method := strings.ToUpper(cfg.Method)
@@ -54,7 +82,7 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 		method = http.MethodGet
 	}
 
-	renderedURL := renderTemplate(cfg.URL, ec.Input)
+	renderedURL := renderTemplate(rawURL, ec.Input)
 
 	timeoutSeconds := cfg.TimeoutSeconds
 	if timeoutSeconds <= 0 {
@@ -85,10 +113,12 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 	}
 
 	// Apply authentication.
-	switch strings.ToLower(cfg.AuthType) {
-	case "bearer":
+	switch {
+	case cfg.UseCallerToken && ec.CallerToken != "":
+		req.Header.Set("Authorization", "Bearer "+ec.CallerToken)
+	case strings.EqualFold(cfg.AuthType, "bearer") && cfg.AuthToken != "":
 		req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
-	case "basic":
+	case strings.EqualFold(cfg.AuthType, "basic") && cfg.AuthToken != "":
 		req.Header.Set("Authorization", "Basic "+cfg.AuthToken)
 	}
 
@@ -131,12 +161,18 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	return &cfg, nil
 }
 
-// renderTemplate replaces all {{input.key}} placeholders in tmpl with the
-// corresponding string values from input.
+// renderTemplate replaces placeholders in tmpl with corresponding string values
+// from input. Supports two formats:
+//   - {key}          — used by tool configs stored in the database
+//   - {{input.key}}  — alternative format
 func renderTemplate(tmpl string, input map[string]any) string {
-	pairs := make([]string, 0, len(input)*2)
+	pairs := make([]string, 0, len(input)*4)
 	for k, v := range input {
-		pairs = append(pairs, fmt.Sprintf("{{input.%s}}", k), fmt.Sprintf("%v", v))
+		val := fmt.Sprintf("%v", v)
+		pairs = append(pairs,
+			fmt.Sprintf("{%s}", k), val,
+			fmt.Sprintf("{{input.%s}}", k), val,
+		)
 	}
 	return strings.NewReplacer(pairs...).Replace(tmpl)
 }

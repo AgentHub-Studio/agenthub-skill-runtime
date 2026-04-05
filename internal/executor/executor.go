@@ -10,6 +10,8 @@ type ExecutionContext struct {
 	SkillSlug string
 	// TenantID is the tenant context extracted from the JWT issuer.
 	TenantID string
+	// CallerToken is the raw Bearer JWT of the caller, forwarded when useCallerToken is true.
+	CallerToken string
 	// Input holds the caller-supplied input parameters for the tool.
 	Input map[string]any
 	// Config holds the tool configuration loaded from the database (JSONB).

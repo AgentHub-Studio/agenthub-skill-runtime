@@ -29,7 +29,7 @@ type Server struct {
 // New creates a new Server with all routes mounted.
 func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	reg := executor.NewRegistry()
-	reg.Register(&exechttp.HTTPToolExecutor{})
+	reg.Register(exechttp.NewHTTPToolExecutor(cfg.BackendBaseURL))
 	reg.Register(sql.NewSQLToolExecutor(pool))
 	reg.Register(docsearch.NewDocumentSearchToolExecutor(pool))
 	reg.Register(mcp.NewMCPToolExecutor(pool))

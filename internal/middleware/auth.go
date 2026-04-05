@@ -22,6 +22,9 @@ const tenantIDKey contextKey = "tenantID"
 // claimsKey is the context key for JWT claims.
 const claimsKey contextKey = "jwtClaims"
 
+// rawTokenKey is the context key for the raw Bearer JWT string.
+const rawTokenKey contextKey = "rawToken"
+
 var issuerTenantRe = regexp.MustCompile(`/realms/([^/]+)`)
 
 // jwksCacheEntry holds a cached JWKS response with an expiry time.
@@ -187,6 +190,7 @@ func Auth(keycloakBaseURL string) func(http.Handler) http.Handler {
 
 			ctx := context.WithValue(r.Context(), tenantIDKey, tenantID)
 			ctx = context.WithValue(ctx, claimsKey, token.Claims)
+			ctx = context.WithValue(ctx, rawTokenKey, tokenStr)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -202,6 +206,12 @@ func TenantIDFromContext(ctx context.Context) string {
 func ClaimsFromContext(ctx context.Context) jwt.Claims {
 	c, _ := ctx.Value(claimsKey).(jwt.Claims)
 	return c
+}
+
+// RawTokenFromContext returns the raw Bearer JWT string stored in ctx by Auth middleware.
+func RawTokenFromContext(ctx context.Context) string {
+	t, _ := ctx.Value(rawTokenKey).(string)
+	return t
 }
 
 func writeUnauthorized(w http.ResponseWriter, msg string) {

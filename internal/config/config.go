@@ -17,6 +17,8 @@ type Config struct {
 	LogLevel           string `env:"LOG_LEVEL"          envDefault:"info"`
 	OTLPEndpoint       string `env:"OTLP_ENDPOINT"`
 	RabbitMQURL        string `env:"RABBITMQ_URL"`
+	// BackendBaseURL is prepended to relative HTTP tool URLs (e.g. /api/skills → http://agenthub-api:8081/api/skills).
+	BackendBaseURL string `env:"BACKEND_BASE_URL" envDefault:"http://agenthub-api:8081"`
 }
 
 // Load parses configuration from environment variables.

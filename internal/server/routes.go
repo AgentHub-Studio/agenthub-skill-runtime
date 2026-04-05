@@ -21,12 +21,36 @@ func mountRoutes(r chi.Router, s *Server) {
 	r.Post("/api/tools/{toolId}/execute", s.handleExecuteTool)
 }
 
+// executeBody is the structured request body for skill/tool execution.
+type executeBody struct {
+	Input   map[string]any `json:"input"`
+	Context struct {
+		TenantID  string `json:"tenantId"`
+		AgentID   string `json:"agentId"`
+		SessionID string `json:"sessionId"`
+	} `json:"context"`
+}
+
+// parseExecuteBody decodes the request body. Supports both the structured
+// {"input": {...}, "context": {...}} envelope (from the agentic runner) and
+// a flat {"key": value, ...} map for direct tool calls.
+func parseExecuteBody(r *http.Request) (map[string]any, error) {
+	var body executeBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	if body.Input != nil {
+		return body.Input, nil
+	}
+	return map[string]any{}, nil
+}
+
 func (s *Server) handleExecuteSkill(w http.ResponseWriter, r *http.Request) {
 	skillSlug := chi.URLParam(r, "skillSlug")
 	tenantID := middleware.TenantIDFromContext(r.Context())
 
-	var input map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	input, err := parseExecuteBody(r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -44,8 +68,8 @@ func (s *Server) handleExecuteTool(w http.ResponseWriter, r *http.Request) {
 	toolID := chi.URLParam(r, "toolId")
 	tenantID := middleware.TenantIDFromContext(r.Context())
 
-	var input map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	input, err := parseExecuteBody(r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -78,11 +102,12 @@ func (s *Server) executeTool(w http.ResponseWriter, r *http.Request, tool *execu
 	}
 
 	ec := executor.ExecutionContext{
-		ToolID:    tool.ID,
-		SkillSlug: skillSlug,
-		TenantID:  tenantID,
-		Input:     input,
-		Config:    config,
+		ToolID:      tool.ID,
+		SkillSlug:   skillSlug,
+		TenantID:    tenantID,
+		CallerToken: middleware.RawTokenFromContext(r.Context()),
+		Input:       input,
+		Config:      config,
 	}
 
 	inv := invoker.New(exec, invoker.DefaultConfig())
