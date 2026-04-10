@@ -50,12 +50,15 @@ func (e *HTTPToolExecutor) WithURLValidator(fn func(string) error) *HTTPToolExec
 func (e *HTTPToolExecutor) GetToolType() string { return "HTTP" }
 
 // httpConfig holds parsed configuration for an HTTP tool.
+// BodyTemplate is normalised from three possible JSON field names:
+// "bodyTemplate" (camelCase, preferred), "body_template" (snake_case, legacy),
+// "body" (simple alias). See parseHTTPConfig for the resolution order (P-C160-1/P-C236-1).
 type httpConfig struct {
 	URL             string            `json:"url"`
 	URLTemplate     string            `json:"urlTemplate"` // alias used by some tool configs
 	Method          string            `json:"method"`
 	Headers         map[string]string `json:"headers"`
-	BodyTemplate    string            `json:"body_template"`
+	BodyTemplate    string            // normalised — see parseHTTPConfig
 	TimeoutSeconds  int               `json:"timeout_seconds"`
 	AuthType        string            `json:"auth_type"`
 	AuthToken       string            `json:"auth_token"`
@@ -170,16 +173,61 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 }
 
 // parseHTTPConfig decodes the executor config map into an httpConfig struct.
+// It resolves BodyTemplate from three possible field names with the following
+// priority: "bodyTemplate" (camelCase) > "body_template" (snake_case) > "body".
+// This preserves backwards compatibility with legacy configs while accepting
+// the camelCase format used by the frontend and migrations (P-C160-1/P-C236-1).
 func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	data, err := json.Marshal(raw)
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	var cfg httpConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
+
+	// rawHTTPConfig mirrors httpConfig but exposes all three body field aliases
+	// so we can apply priority logic after unmarshaling.
+	type rawHTTPConfig struct {
+		URL             string            `json:"url"`
+		URLTemplate     string            `json:"urlTemplate"`
+		Method          string            `json:"method"`
+		Headers         map[string]string `json:"headers"`
+		BodyTemplate    string            `json:"bodyTemplate"`    // camelCase (preferred)
+		BodyTemplateSC  string            `json:"body_template"`   // snake_case (legacy)
+		Body            string            `json:"body"`            // simple alias
+		TimeoutSeconds  int               `json:"timeout_seconds"`
+		AuthType        string            `json:"auth_type"`
+		AuthToken       string            `json:"auth_token"`
+		UseCallerToken  bool              `json:"useCallerToken"`
+		BaseURL         string            `json:"baseUrl"`
+	}
+
+	var r rawHTTPConfig
+	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
-	return &cfg, nil
+
+	cfg := &httpConfig{
+		URL:            r.URL,
+		URLTemplate:    r.URLTemplate,
+		Method:         r.Method,
+		Headers:        r.Headers,
+		TimeoutSeconds: r.TimeoutSeconds,
+		AuthType:       r.AuthType,
+		AuthToken:      r.AuthToken,
+		UseCallerToken: r.UseCallerToken,
+		BaseURL:        r.BaseURL,
+	}
+
+	// Priority: bodyTemplate > body_template > body.
+	switch {
+	case r.BodyTemplate != "":
+		cfg.BodyTemplate = r.BodyTemplate
+	case r.BodyTemplateSC != "":
+		cfg.BodyTemplate = r.BodyTemplateSC
+	case r.Body != "":
+		cfg.BodyTemplate = r.Body
+	}
+
+	return cfg, nil
 }
 
 // renderTemplate replaces placeholders in tmpl with corresponding string values

@@ -3,6 +3,7 @@ package http_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -178,4 +179,78 @@ func TestHTTPExecutor_URLTemplateQueryEncoding(t *testing.T) {
 	// The server should receive the decoded value — net/http automatically decodes
 	// the query string, so if encoding was correct the original value is recovered.
 	assert.Equal(t, "hello world & more", receivedQuery)
+}
+
+// --- TR-01-TASK-08: bodyTemplate/body camelCase aliases (P-C160-1/P-C236-1) ---
+
+// TestHTTPExecutor_CamelCase_BodyTemplate verifies that "bodyTemplate" (camelCase)
+// is accepted and the body is rendered and sent.
+func TestHTTPExecutor_CamelCase_BodyTemplate(t *testing.T) {
+	var received map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":          srv.URL,
+			"method":       "POST",
+			"bodyTemplate": `{"city":"{{city}}"}`, // camelCase key
+		},
+		Input: map[string]any{"city": "Curitiba"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Curitiba", received["city"])
+}
+
+// TestHTTPExecutor_Body_Alias verifies that "body" is accepted as a simple alias.
+func TestHTTPExecutor_Body_Alias(t *testing.T) {
+	var received map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":    srv.URL,
+			"method": "POST",
+			"body":   `{"value":"{{val}}"}`, // simple "body" key
+		},
+		Input: map[string]any{"val": "test"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "test", received["value"])
+}
+
+// TestHTTPExecutor_CamelCasePrecedesSnakeCase verifies that "bodyTemplate" takes
+// priority over "body_template" when both are present.
+func TestHTTPExecutor_CamelCasePrecedesSnakeCase(t *testing.T) {
+	var receivedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":           srv.URL,
+			"method":        "POST",
+			"bodyTemplate":  `{"source":"camel"}`, // camelCase wins
+			"body_template": `{"source":"snake"}`,
+		},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(receivedBody), "camel")
+	assert.NotContains(t, string(receivedBody), "snake")
 }
