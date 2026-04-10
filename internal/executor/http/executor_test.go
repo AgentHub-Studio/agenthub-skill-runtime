@@ -145,3 +145,30 @@ func TestHTTPExecutor_InvalidURL(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+// TestHTTPExecutor_URLTemplateQueryEncoding validates P-C285-1 fix:
+// values substituted into the URL must be percent-encoded so that special
+// characters (spaces, &, =, +) do not corrupt the request URL.
+func TestHTTPExecutor_URLTemplateQueryEncoding(t *testing.T) {
+	var receivedQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture the raw query string as parsed by the HTTP server.
+		receivedQuery = r.URL.Query().Get("q")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	e := &httpexec.HTTPToolExecutor{}
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":    srv.URL + "/search?q={{input.query}}",
+			"method": "GET",
+		},
+		// P-C285-1: this value contains spaces and special chars that must be encoded.
+		Input: map[string]any{"query": "hello world & more"},
+	})
+	require.NoError(t, err)
+	// The server should receive the decoded value — net/http automatically decodes
+	// the query string, so if encoding was correct the original value is recovered.
+	assert.Equal(t, "hello world & more", receivedQuery)
+}

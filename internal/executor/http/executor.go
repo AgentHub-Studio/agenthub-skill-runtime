@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -82,7 +83,7 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 		method = http.MethodGet
 	}
 
-	renderedURL := renderTemplate(rawURL, ec.Input)
+	renderedURL := renderTemplateURL(rawURL, ec.Input)
 
 	timeoutSeconds := cfg.TimeoutSeconds
 	if timeoutSeconds <= 0 {
@@ -162,16 +163,38 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 }
 
 // renderTemplate replaces placeholders in tmpl with corresponding string values
-// from input. Supports two formats:
-//   - {key}          — used by tool configs stored in the database
-//   - {{input.key}}  — alternative format
+// from input. Supports three formats (matched in priority order to avoid
+// partial substitution of double-brace templates):
+//   - {{key}}         — Handlebars/Mustache-style (most intuitive for users)
+//   - {key}           — single-brace format stored in the database
+//   - {{input.key}}   — explicit input-namespace format
 func renderTemplate(tmpl string, input map[string]any) string {
-	pairs := make([]string, 0, len(input)*4)
+	pairs := make([]string, 0, len(input)*6)
 	for k, v := range input {
 		val := fmt.Sprintf("%v", v)
+		// {{key}} must come BEFORE {key} so that double-brace templates are
+		// matched first; otherwise {key} inside {{key}} would be replaced first,
+		// producing {value} (with stray curly braces) instead of value.
 		pairs = append(pairs,
+			fmt.Sprintf("{{%s}}", k), val,
 			fmt.Sprintf("{%s}", k), val,
 			fmt.Sprintf("{{input.%s}}", k), val,
+		)
+	}
+	return strings.NewReplacer(pairs...).Replace(tmpl)
+}
+
+// renderTemplateURL is like renderTemplate but URL-encodes each substituted value.
+// P-C285-1: prevents malformed URLs when input values contain spaces, &, =, +, etc.
+// Should be used only for URL rendering, NOT for body/header templates.
+func renderTemplateURL(tmpl string, input map[string]any) string {
+	pairs := make([]string, 0, len(input)*6)
+	for k, v := range input {
+		encoded := url.QueryEscape(fmt.Sprintf("%v", v))
+		pairs = append(pairs,
+			fmt.Sprintf("{{%s}}", k), encoded,
+			fmt.Sprintf("{%s}", k), encoded,
+			fmt.Sprintf("{{input.%s}}", k), encoded,
 		)
 	}
 	return strings.NewReplacer(pairs...).Replace(tmpl)
