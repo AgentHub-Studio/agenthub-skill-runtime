@@ -27,12 +27,23 @@ import (
 type HTTPToolExecutor struct {
 	// backendBaseURL is prepended to relative URLs (starting with /).
 	backendBaseURL string
+	// urlValidator is the SSRF guard applied before every outbound request.
+	// When nil, ValidateURL (the production SSRF guard) is used.
+	// Override for testing via WithURLValidator.
+	urlValidator func(string) error
 }
 
 // NewHTTPToolExecutor creates an HTTPToolExecutor with the given backend base URL.
 // The base URL is used for relative tool URLs (e.g. /api/skills → http://agenthub-api:8081/api/skills).
 func NewHTTPToolExecutor(backendBaseURL string) *HTTPToolExecutor {
 	return &HTTPToolExecutor{backendBaseURL: backendBaseURL}
+}
+
+// WithURLValidator overrides the SSRF URL validator. Intended for testing only.
+// Pass nil to restore the default production ValidateURL guard.
+func (e *HTTPToolExecutor) WithURLValidator(fn func(string) error) *HTTPToolExecutor {
+	e.urlValidator = fn
+	return e
 }
 
 // GetToolType returns the tool type identifier.
@@ -84,6 +95,15 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 	}
 
 	renderedURL := renderTemplateURL(rawURL, ec.Input)
+
+	// P-C220-1 / P-C221-1: reject SSRF attempts before sending any request.
+	validate := e.urlValidator
+	if validate == nil {
+		validate = ValidateURL // production default
+	}
+	if err := validate(renderedURL); err != nil {
+		return nil, fmt.Errorf("http executor: blocked URL (%w)", err)
+	}
 
 	timeoutSeconds := cfg.TimeoutSeconds
 	if timeoutSeconds <= 0 {

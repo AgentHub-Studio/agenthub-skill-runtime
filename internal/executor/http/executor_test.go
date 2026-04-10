@@ -14,8 +14,15 @@ import (
 	httpexec "github.com/AgentHub-Studio/agenthub-skill-runtime/internal/executor/http"
 )
 
+// noSSRFExecutor returns an executor with SSRF validation disabled for tests that
+// use a local httptest.Server (127.0.0.1). Production callers always use the
+// default executor (which enforces ValidateURL).
+func noSSRFExecutor() *httpexec.HTTPToolExecutor {
+	return httpexec.NewHTTPToolExecutor("").WithURLValidator(func(string) error { return nil })
+}
+
 func TestHTTPExecutor_GetToolType(t *testing.T) {
-	e := &httpexec.HTTPToolExecutor{}
+	e := httpexec.NewHTTPToolExecutor("")
 	assert.Equal(t, "HTTP", e.GetToolType())
 }
 
@@ -27,7 +34,7 @@ func TestHTTPExecutor_SimpleGET_JSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	res, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{"url": srv.URL, "method": "GET"},
 	})
@@ -48,7 +55,7 @@ func TestHTTPExecutor_POSTWithBodyTemplate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	res, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{
 			"url":           srv.URL,
@@ -69,7 +76,7 @@ func TestHTTPExecutor_URLTemplate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	_, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{"url": srv.URL + "/users/{{input.id}}", "method": "GET"},
 		Input:  map[string]any{"id": "42"},
@@ -84,7 +91,7 @@ func TestHTTPExecutor_BearerAuth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	_, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{
 			"url":        srv.URL,
@@ -103,7 +110,7 @@ func TestHTTPExecutor_CustomHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	_, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{
 			"url":     srv.URL,
@@ -121,7 +128,7 @@ func TestHTTPExecutor_NonJSONResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	res, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{"url": srv.URL},
 	})
@@ -130,7 +137,7 @@ func TestHTTPExecutor_NonJSONResponse(t *testing.T) {
 }
 
 func TestHTTPExecutor_MissingURL(t *testing.T) {
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	_, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{},
 	})
@@ -139,7 +146,7 @@ func TestHTTPExecutor_MissingURL(t *testing.T) {
 }
 
 func TestHTTPExecutor_InvalidURL(t *testing.T) {
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	_, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{"url": "://bad-url"},
 	})
@@ -158,7 +165,7 @@ func TestHTTPExecutor_URLTemplateQueryEncoding(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := &httpexec.HTTPToolExecutor{}
+	e := noSSRFExecutor()
 	_, err := e.Execute(context.Background(), executor.ExecutionContext{
 		Config: map[string]any{
 			"url":    srv.URL + "/search?q={{input.query}}",
