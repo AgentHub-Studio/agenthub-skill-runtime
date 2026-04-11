@@ -85,6 +85,26 @@ func TestInvoker_AllAttemptsFail(t *testing.T) {
 	assert.Equal(t, 3, stub.callCount)
 }
 
+func TestInvoker_PermanentError_NoRetry(t *testing.T) {
+	stub := &stubExecutor{
+		toolType:  "MOCK",
+		failUntil: 99,
+		err:       executor.Permanentf("datasource not configured"),
+	}
+	cfg := invoker.Config{
+		MaxRetries: 2, // would allow 3 attempts, but permanent error skips retries
+		RetryDelay: time.Millisecond,
+		Timeout:    time.Second,
+	}
+	inv := invoker.New(stub, cfg)
+	_, err := inv.Invoke(context.Background(), ec())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "permanent error")
+	assert.Contains(t, err.Error(), "datasource not configured")
+	// Must have been called exactly once — no retries for permanent errors.
+	assert.Equal(t, 1, stub.callCount)
+}
+
 func TestInvoker_CircuitBreakerOpensAfterThreshold(t *testing.T) {
 	stub := &stubExecutor{
 		toolType:  "MOCK",

@@ -24,7 +24,7 @@ func TestSQLExecutor_MissingDatasourceID(t *testing.T) {
 		},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "datasource_id is required")
+	assert.Contains(t, err.Error(), "datasource not configured")
 }
 
 func TestSQLExecutor_MissingQuery(t *testing.T) {
@@ -44,7 +44,7 @@ func TestSQLExecutor_EmptyConfig_MissingBothFields(t *testing.T) {
 		Config: map[string]any{},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "datasource_id is required")
+	assert.Contains(t, err.Error(), "datasource not configured")
 }
 
 func TestSQLExecutor_NilConfig_MissingBothFields(t *testing.T) {
@@ -53,7 +53,7 @@ func TestSQLExecutor_NilConfig_MissingBothFields(t *testing.T) {
 		Config: nil,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "datasource_id is required")
+	assert.Contains(t, err.Error(), "datasource not configured")
 }
 
 func TestSQLExecutor_OnlyDatasourceID_MissingQuery(t *testing.T) {

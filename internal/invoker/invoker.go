@@ -108,6 +108,12 @@ func (inv *ToolInvoker) Invoke(ctx context.Context, ec executor.ExecutionContext
 			return result, nil
 		}
 
+		// Permanent errors (config/validation) must not be retried.
+		if executor.IsPermanent(err) {
+			inv.failures.Add(1)
+			return nil, fmt.Errorf("invoker: permanent error (no retry): %w", err)
+		}
+
 		if attempt < inv.cfg.MaxRetries {
 			select {
 			case <-ctx.Done():

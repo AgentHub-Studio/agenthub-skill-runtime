@@ -38,9 +38,10 @@ func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug st
 	query := fmt.Sprintf(`
 		SELECT t.id, t.type, t.config
 		FROM %s.skill s
-		JOIN %s.skill_tool st ON st.skill_id = s.id
+		JOIN %s.skill_tool st ON st.skill_id = s.id AND st.is_active = true
 		JOIN %s.tool t ON t.id = st.tool_id
 		WHERE s.slug = $1
+		ORDER BY st.priority, st.created_at
 		LIMIT 1
 	`, schema, schema, schema)
 

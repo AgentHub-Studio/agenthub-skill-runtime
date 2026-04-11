@@ -1,6 +1,34 @@
 package executor
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// PermanentError wraps an error that must not be retried — e.g. invalid
+// configuration, missing required fields, or unsupported operations.
+// The invoker skips backoff and fails immediately on the first attempt.
+type PermanentError struct {
+	Cause error
+}
+
+func (e *PermanentError) Error() string { return e.Cause.Error() }
+func (e *PermanentError) Unwrap() error { return e.Cause }
+
+// Permanent wraps cause as a PermanentError.
+func Permanent(cause error) error { return &PermanentError{Cause: cause} }
+
+// Permanentf creates a PermanentError from a format string.
+func Permanentf(format string, args ...any) error {
+	return &PermanentError{Cause: fmt.Errorf(format, args...)}
+}
+
+// IsPermanent reports whether err is (or wraps) a PermanentError.
+func IsPermanent(err error) bool {
+	var p *PermanentError
+	return errors.As(err, &p)
+}
 
 // ExecutionContext holds the input data and metadata for a tool execution.
 type ExecutionContext struct {

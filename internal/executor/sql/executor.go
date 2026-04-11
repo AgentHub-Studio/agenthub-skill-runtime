@@ -57,10 +57,10 @@ func (e *SQLToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCont
 	}
 
 	if cfg.DatasourceID == "" {
-		return nil, fmt.Errorf("sql executor: datasource_id is required")
+		return nil, executor.Permanentf("sql executor: datasource not configured — add a datasource_id to the tool config")
 	}
 	if cfg.Query == "" {
-		return nil, fmt.Errorf("sql executor: query is required")
+		return nil, executor.Permanentf("sql executor: query is required")
 	}
 
 	maxRows := cfg.MaxRows
