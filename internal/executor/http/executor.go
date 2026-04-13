@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,9 @@ import (
 //   - useCallerToken: bool (forward the caller's JWT as Authorization: Bearer)
 type HTTPToolExecutor struct {
 	// backendBaseURL is prepended to relative URLs (starting with /).
+	// URLs that begin with backendBaseURL are trusted (platform-configured) and
+	// bypass the SSRF guard — the base URL itself is set by admin config, not by
+	// user-supplied tool content.
 	backendBaseURL string
 	// urlValidator is the SSRF guard applied before every outbound request.
 	// When nil, ValidateURL (the production SSRF guard) is used.
@@ -53,15 +57,16 @@ func (e *HTTPToolExecutor) GetToolType() string { return "HTTP" }
 // BodyTemplate is normalised from three possible JSON field names:
 // "bodyTemplate" (camelCase, preferred), "body_template" (snake_case, legacy),
 // "body" (simple alias). See parseHTTPConfig for the resolution order (P-C160-1/P-C236-1).
+// TimeoutSeconds, AuthType, AuthToken accept both camelCase and snake_case (BUG-TIMEOUT1 fix).
 type httpConfig struct {
 	URL             string            `json:"url"`
 	URLTemplate     string            `json:"urlTemplate"` // alias used by some tool configs
 	Method          string            `json:"method"`
 	Headers         map[string]string `json:"headers"`
 	BodyTemplate    string            // normalised — see parseHTTPConfig
-	TimeoutSeconds  int               `json:"timeout_seconds"`
-	AuthType        string            `json:"auth_type"`
-	AuthToken       string            `json:"auth_token"`
+	TimeoutSeconds  int               // merged from timeoutSeconds (camelCase) and timeout_seconds (snake_case)
+	AuthType        string            // merged from authType (camelCase) and auth_type (snake_case)
+	AuthToken       string            // merged from authToken (camelCase) and auth_token (snake_case)
 	UseCallerToken  bool              `json:"useCallerToken"`
 	BaseURL         string            `json:"baseUrl"` // optional base URL prefix
 }
@@ -99,13 +104,28 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 
 	renderedURL := renderTemplateURL(rawURL, ec.Input)
 
-	// P-C220-1 / P-C221-1: reject SSRF attempts before sending any request.
-	validate := e.urlValidator
-	if validate == nil {
-		validate = ValidateURL // production default
+	// BUG-HTTP-GET-PARAMS: for GET (and DELETE/HEAD) requests, append any input
+	// parameters that were not consumed as URL template placeholders as query string
+	// parameters. This ensures that when a tool's URL has no {city} placeholder
+	// but the LLM provides city=Tokyo, the parameter is forwarded as ?city=Tokyo.
+	if method == http.MethodGet || method == http.MethodDelete || method == http.MethodHead {
+		renderedURL = appendUnusedInputAsQuery(rawURL, renderedURL, ec.Input)
 	}
-	if err := validate(renderedURL); err != nil {
-		return nil, fmt.Errorf("http executor: blocked URL (%w)", err)
+
+	// P-C220-1 / P-C221-1: reject SSRF attempts before sending any request.
+	// Exception: URLs rooted at backendBaseURL are platform-configured (admin-set)
+	// and trusted — they are not user-supplied and bypass the SSRF guard so that
+	// core tools (e.g. agenthub_list_skills) can call back to the API service.
+	trustedBase := strings.TrimRight(e.backendBaseURL, "/")
+	isTrustedBackend := trustedBase != "" && (strings.HasPrefix(renderedURL, trustedBase+"/") || renderedURL == trustedBase)
+	if !isTrustedBackend {
+		validate := e.urlValidator
+		if validate == nil {
+			validate = ValidateURL // production default
+		}
+		if err := validate(renderedURL); err != nil {
+			return nil, fmt.Errorf("http executor: blocked URL (%w)", err)
+		}
 	}
 
 	timeoutSeconds := cfg.TimeoutSeconds
@@ -164,6 +184,24 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 		responsePayload = string(respBytes)
 	}
 
+	// P-F1-1: Treat 4xx/5xx status codes as errors so the LLM receives a clear
+	// failure signal instead of an empty/partial response that causes it to retry.
+	if resp.StatusCode >= 400 {
+		body := ""
+		if s, ok := responsePayload.(string); ok {
+			body = s
+		} else if responsePayload != nil {
+			if b, err := json.Marshal(responsePayload); err == nil {
+				body = string(b)
+			}
+		}
+		msg := fmt.Sprintf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		if body != "" {
+			msg = fmt.Sprintf("%s: %s", msg, body)
+		}
+		return nil, fmt.Errorf("http executor: %s", msg)
+	}
+
 	output := map[string]any{
 		"response":    responsePayload,
 		"status_code": resp.StatusCode,
@@ -185,17 +223,26 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 
 	// rawHTTPConfig mirrors httpConfig but exposes all three body field aliases
 	// so we can apply priority logic after unmarshaling.
+	// Body template fields use json.RawMessage to accept both string and object
+	// values — some core tool configs store bodyTemplate as a JSON object for
+	// readability; we normalise them to a compact JSON string (P-KB2-1).
 	type rawHTTPConfig struct {
 		URL             string            `json:"url"`
 		URLTemplate     string            `json:"urlTemplate"`
 		Method          string            `json:"method"`
 		Headers         map[string]string `json:"headers"`
-		BodyTemplate    string            `json:"bodyTemplate"`    // camelCase (preferred)
-		BodyTemplateSC  string            `json:"body_template"`   // snake_case (legacy)
-		Body            string            `json:"body"`            // simple alias
-		TimeoutSeconds  int               `json:"timeout_seconds"`
-		AuthType        string            `json:"auth_type"`
-		AuthToken       string            `json:"auth_token"`
+		BodyTemplate    json.RawMessage   `json:"bodyTemplate"`    // camelCase (preferred)
+		BodyTemplateSC  json.RawMessage   `json:"body_template"`   // snake_case (legacy)
+		Body            json.RawMessage   `json:"body"`            // simple alias
+		// BUG-TIMEOUT1: accept both camelCase (API convention) and snake_case (legacy).
+		// Prefer camelCase; snake_case values are merged after unmarshaling.
+		TimeoutSeconds    int    `json:"timeoutSeconds"`   // camelCase (preferred)
+		TimeoutSecondsSC  int    `json:"timeout_seconds"`  // snake_case (legacy)
+		TimeoutMs         int    `json:"timeoutMs"`        // milliseconds (frontend/API convention)
+		AuthType          string `json:"authType"`         // camelCase (preferred)
+		AuthTypeSC        string `json:"auth_type"`        // snake_case (legacy)
+		AuthToken         string `json:"authToken"`        // camelCase (preferred)
+		AuthTokenSC       string `json:"auth_token"`       // snake_case (legacy)
 		UseCallerToken  bool              `json:"useCallerToken"`
 		BaseURL         string            `json:"baseUrl"`
 	}
@@ -205,26 +252,72 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	// BUG-TIMEOUT1: merge camelCase (preferred) and snake_case (legacy) variants.
+	// camelCase wins when both are present and non-zero.
+	// Also support timeoutMs (milliseconds) as used by the frontend/API — convert to seconds.
+	timeoutSeconds := r.TimeoutSeconds
+	if timeoutSeconds == 0 {
+		timeoutSeconds = r.TimeoutSecondsSC
+	}
+	if timeoutSeconds == 0 && r.TimeoutMs > 0 {
+		// Round up to nearest second; ensure at least 1s for small values.
+		timeoutSeconds = (r.TimeoutMs + 999) / 1000
+		if timeoutSeconds < 1 {
+			timeoutSeconds = 1
+		}
+	}
+	authType := r.AuthType
+	if authType == "" {
+		authType = r.AuthTypeSC
+	}
+	authToken := r.AuthToken
+	if authToken == "" {
+		authToken = r.AuthTokenSC
+	}
+
 	cfg := &httpConfig{
 		URL:            r.URL,
 		URLTemplate:    r.URLTemplate,
 		Method:         r.Method,
 		Headers:        r.Headers,
-		TimeoutSeconds: r.TimeoutSeconds,
-		AuthType:       r.AuthType,
-		AuthToken:      r.AuthToken,
+		TimeoutSeconds: timeoutSeconds,
+		AuthType:       authType,
+		AuthToken:      authToken,
 		UseCallerToken: r.UseCallerToken,
 		BaseURL:        r.BaseURL,
 	}
 
 	// Priority: bodyTemplate > body_template > body.
+	// normaliseBody converts a json.RawMessage to a string:
+	//   - JSON string → unquoted value (e.g. `"foo"` → `foo`)
+	//   - JSON object/array → compact JSON string (e.g. `{"k":"v"}` → `{"k":"v"}`)
+	//   - null / empty → empty string
+	normaliseBody := func(raw json.RawMessage) string {
+		if len(raw) == 0 || string(raw) == "null" {
+			return ""
+		}
+		if raw[0] == '"' {
+			// Already a JSON string — unquote it.
+			var s string
+			if err := json.Unmarshal(raw, &s); err == nil {
+				return s
+			}
+		}
+		// Object or array — compact it into a JSON string template.
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, raw); err == nil {
+			return buf.String()
+		}
+		return string(raw)
+	}
+
 	switch {
-	case r.BodyTemplate != "":
-		cfg.BodyTemplate = r.BodyTemplate
-	case r.BodyTemplateSC != "":
-		cfg.BodyTemplate = r.BodyTemplateSC
-	case r.Body != "":
-		cfg.BodyTemplate = r.Body
+	case len(r.BodyTemplate) > 0 && string(r.BodyTemplate) != "null":
+		cfg.BodyTemplate = normaliseBody(r.BodyTemplate)
+	case len(r.BodyTemplateSC) > 0 && string(r.BodyTemplateSC) != "null":
+		cfg.BodyTemplate = normaliseBody(r.BodyTemplateSC)
+	case len(r.Body) > 0 && string(r.Body) != "null":
+		cfg.BodyTemplate = normaliseBody(r.Body)
 	}
 
 	return cfg, nil
@@ -250,6 +343,41 @@ func renderTemplate(tmpl string, input map[string]any) string {
 		)
 	}
 	return strings.NewReplacer(pairs...).Replace(tmpl)
+}
+
+// appendUnusedInputAsQuery appends input keys that were NOT consumed as {key}
+// template placeholders in the original URL template as query string parameters
+// to the already-rendered URL.
+// BUG-HTTP-GET-PARAMS: for GET requests without URL template vars, parameters
+// provided by the LLM were silently dropped. This fix forwards them as query params.
+func appendUnusedInputAsQuery(rawTemplate, renderedURL string, input map[string]any) string {
+	if len(input) == 0 {
+		return renderedURL
+	}
+	// Determine which keys were used as template placeholders in the original URL.
+	used := map[string]bool{}
+	for k := range input {
+		if strings.Contains(rawTemplate, "{"+k+"}") ||
+			strings.Contains(rawTemplate, "{{"+k+"}}") ||
+			strings.Contains(rawTemplate, "{{input."+k+"}}") {
+			used[k] = true
+		}
+	}
+	// Build query params for keys that were not substituted.
+	qv := url.Values{}
+	for k, v := range input {
+		if !used[k] {
+			qv.Set(k, fmt.Sprintf("%v", v))
+		}
+	}
+	if len(qv) == 0 {
+		return renderedURL
+	}
+	sep := "?"
+	if strings.Contains(renderedURL, "?") {
+		sep = "&"
+	}
+	return renderedURL + sep + qv.Encode()
 }
 
 // renderTemplateURL is like renderTemplate but URL-encodes each substituted value.

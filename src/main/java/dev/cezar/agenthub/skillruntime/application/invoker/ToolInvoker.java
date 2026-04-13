@@ -146,8 +146,18 @@ public class ToolInvoker {
         // Cria contexto de execução
         ToolExecutor.ExecutionContext context = buildExecutionContext(request);
 
-        // Timeout padrão ou customizado
-        int timeoutMs = request.timeout() != null ? request.timeout() : 30000;
+        // Timeout priority: request.timeout() > tool.config("timeoutMs") > 30000ms default.
+        // The Go runner does not pass the tool config timeout in the request, so we fall back
+        // to reading timeoutMs directly from the tool configuration (BUG-TOOL-TIMEOUT-IGNORED).
+        int timeoutMs;
+        if (request.timeout() != null) {
+            timeoutMs = request.timeout();
+        } else if (tool.config() != null && tool.config().containsKey("timeoutMs")) {
+            Object raw = tool.config().get("timeoutMs");
+            timeoutMs = raw instanceof Number n ? n.intValue() : 30000;
+        } else {
+            timeoutMs = 30000;
+        }
 
         // Retry policy padrão ou customizada
         SkillRequest.RetryPolicy retryPolicy = request.retryPolicy() != null

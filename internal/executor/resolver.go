@@ -33,6 +33,8 @@ func NewSkillResolver(pool *pgxpool.Pool) *SkillResolver {
 
 // ResolveSkill returns the bound Tool for a skill slug in the given tenant schema.
 // It follows the skill → skill_tool → tool chain.
+// Fallback: if no skill with that slug exists in the tenant schema, looks up the
+// slug directly in ah_core.tool (platform tools like agenthub_list_skills).
 func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug string) (*Tool, error) {
 	schema := "ah_" + tenantID
 	query := fmt.Sprintf(`
@@ -48,7 +50,16 @@ func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug st
 	var tool Tool
 	row := r.pool.QueryRow(ctx, query, skillSlug)
 	if err := row.Scan(&tool.ID, &tool.Type, &tool.Config); err != nil {
-		return nil, fmt.Errorf("resolver: skill %q not found in tenant %q: %w", skillSlug, tenantID, err)
+		// Fallback: try resolving as a platform tool from ah_core by slug.
+		// Core tools (e.g. agenthub_list_skills) are stored in ah_core.tool and
+		// exposed to the LLM by tool slug directly — there is no corresponding
+		// skill entry in the tenant schema for them.
+		coreQuery := `SELECT id, type, config FROM ah_core.tool WHERE slug = $1 AND is_active = true`
+		coreRow := r.pool.QueryRow(ctx, coreQuery, skillSlug)
+		if coreErr := coreRow.Scan(&tool.ID, &tool.Type, &tool.Config); coreErr != nil {
+			return nil, fmt.Errorf("resolver: skill %q not found in tenant %q: %w", skillSlug, tenantID, err)
+		}
+		return &tool, nil
 	}
 	return &tool, nil
 }

@@ -254,3 +254,47 @@ func TestHTTPExecutor_CamelCasePrecedesSnakeCase(t *testing.T) {
 	assert.Contains(t, string(receivedBody), "camel")
 	assert.NotContains(t, string(receivedBody), "snake")
 }
+
+// TestHTTPExecutor_CamelCaseTimeout verifies that "timeoutSeconds" (camelCase) is
+// honoured and causes a context deadline exceeded error when the server is too slow.
+// BUG-TIMEOUT1 fix: previously only "timeout_seconds" (snake_case) was recognised.
+func TestHTTPExecutor_CamelCaseTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block until the client disconnects (timeout fires).
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":            srv.URL,
+			"method":         "GET",
+			"timeoutSeconds": 1, // camelCase — must be honoured
+		},
+	})
+	require.Error(t, err, "expected timeout error but got nil")
+	assert.Contains(t, err.Error(), "request failed")
+}
+
+// TestHTTPExecutor_SnakeCaseTimeoutStillWorks verifies that legacy "timeout_seconds"
+// (snake_case) is still accepted after the BUG-TIMEOUT1 fix.
+func TestHTTPExecutor_SnakeCaseTimeoutStillWorks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":             srv.URL,
+			"method":          "GET",
+			"timeout_seconds": 1, // snake_case — must still work
+		},
+	})
+	require.Error(t, err, "expected timeout error but got nil")
+	assert.Contains(t, err.Error(), "request failed")
+}
