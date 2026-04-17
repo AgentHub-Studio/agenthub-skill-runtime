@@ -69,6 +69,14 @@ type httpConfig struct {
 	AuthToken       string            // merged from authToken (camelCase) and auth_token (snake_case)
 	UseCallerToken  bool              `json:"useCallerToken"`
 	BaseURL         string            `json:"baseUrl"` // optional base URL prefix
+	// AllowedInputKeys is the set of property names declared in the tool's
+	// inputSchema.properties. When non-empty, appendUnusedInputAsQuery only
+	// forwards keys that belong to this set — preventing LLM-hallucinated
+	// args (e.g. "state":"SP") from being smuggled into the target URL and
+	// rejected by strict upstreams like wttr.in (HTTP 500 ERR003).
+	// Nil means "no schema declared", in which case all unused input keys
+	// are forwarded (legacy BUG-HTTP-GET-PARAMS behaviour).
+	AllowedInputKeys map[string]bool
 }
 
 // Execute performs the HTTP request described in ec.Config using values from ec.Input.
@@ -109,7 +117,7 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 	// parameters. This ensures that when a tool's URL has no {city} placeholder
 	// but the LLM provides city=Tokyo, the parameter is forwarded as ?city=Tokyo.
 	if method == http.MethodGet || method == http.MethodDelete || method == http.MethodHead {
-		renderedURL = appendUnusedInputAsQuery(rawURL, renderedURL, ec.Input)
+		renderedURL = appendUnusedInputAsQuery(rawURL, renderedURL, ec.Input, cfg.AllowedInputKeys)
 	}
 
 	// P-C220-1 / P-C221-1: reject SSRF attempts before sending any request.
@@ -245,6 +253,11 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 		AuthTokenSC       string `json:"auth_token"`       // snake_case (legacy)
 		UseCallerToken  bool              `json:"useCallerToken"`
 		BaseURL         string            `json:"baseUrl"`
+		// InputSchema mirrors the JSON Schema that ships with every tool config.
+		// We only care about the "properties" map here — its keys define which
+		// LLM-supplied inputs are legitimate args. Keys NOT listed there are
+		// dropped before being appended as query params (BUG-EXTRA-PARAMS).
+		InputSchema json.RawMessage `json:"inputSchema"`
 	}
 
 	var r rawHTTPConfig
@@ -276,15 +289,16 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	}
 
 	cfg := &httpConfig{
-		URL:            r.URL,
-		URLTemplate:    r.URLTemplate,
-		Method:         r.Method,
-		Headers:        r.Headers,
-		TimeoutSeconds: timeoutSeconds,
-		AuthType:       authType,
-		AuthToken:      authToken,
-		UseCallerToken: r.UseCallerToken,
-		BaseURL:        r.BaseURL,
+		URL:              r.URL,
+		URLTemplate:      r.URLTemplate,
+		Method:           r.Method,
+		Headers:          r.Headers,
+		TimeoutSeconds:   timeoutSeconds,
+		AuthType:         authType,
+		AuthToken:        authToken,
+		UseCallerToken:   r.UseCallerToken,
+		BaseURL:          r.BaseURL,
+		AllowedInputKeys: extractSchemaKeys(r.InputSchema),
 	}
 
 	// Priority: bodyTemplate > body_template > body.
@@ -348,9 +362,17 @@ func renderTemplate(tmpl string, input map[string]any) string {
 // appendUnusedInputAsQuery appends input keys that were NOT consumed as {key}
 // template placeholders in the original URL template as query string parameters
 // to the already-rendered URL.
+//
 // BUG-HTTP-GET-PARAMS: for GET requests without URL template vars, parameters
 // provided by the LLM were silently dropped. This fix forwards them as query params.
-func appendUnusedInputAsQuery(rawTemplate, renderedURL string, input map[string]any) string {
+//
+// BUG-EXTRA-PARAMS: when allowedKeys is non-nil, only keys listed in the tool's
+// inputSchema.properties are forwarded. LLMs routinely invent extra fields
+// (e.g. "state":"SP" for a weather tool that only declares "city" and "units")
+// and upstreams that reject unknown query params (wttr.in → HTTP 500 ERR003)
+// would break every such call. When allowedKeys is nil the schema is unknown
+// and legacy behaviour (forward all) is preserved.
+func appendUnusedInputAsQuery(rawTemplate, renderedURL string, input map[string]any, allowedKeys map[string]bool) string {
 	if len(input) == 0 {
 		return renderedURL
 	}
@@ -363,12 +385,17 @@ func appendUnusedInputAsQuery(rawTemplate, renderedURL string, input map[string]
 			used[k] = true
 		}
 	}
-	// Build query params for keys that were not substituted.
+	// Build query params for keys that were not substituted. When the tool
+	// declared an inputSchema, also drop keys that aren't in its properties.
 	qv := url.Values{}
 	for k, v := range input {
-		if !used[k] {
-			qv.Set(k, fmt.Sprintf("%v", v))
+		if used[k] {
+			continue
 		}
+		if allowedKeys != nil && !allowedKeys[k] {
+			continue
+		}
+		qv.Set(k, fmt.Sprintf("%v", v))
 	}
 	if len(qv) == 0 {
 		return renderedURL
@@ -378,6 +405,32 @@ func appendUnusedInputAsQuery(rawTemplate, renderedURL string, input map[string]
 		sep = "&"
 	}
 	return renderedURL + sep + qv.Encode()
+}
+
+// extractSchemaKeys returns the set of property names declared in a JSON
+// Schema payload's "properties" object, or nil when the payload is empty,
+// malformed, or lacks a properties map. Only top-level property names are
+// considered — nested schemas are intentionally ignored because they apply
+// to nested values that are never forwarded as query params.
+func extractSchemaKeys(raw json.RawMessage) map[string]bool {
+	trimmed := string(raw)
+	if len(raw) == 0 || trimmed == "null" {
+		return nil
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil
+	}
+	if len(schema.Properties) == 0 {
+		return nil
+	}
+	keys := make(map[string]bool, len(schema.Properties))
+	for k := range schema.Properties {
+		keys[k] = true
+	}
+	return keys
 }
 
 // renderTemplateURL is like renderTemplate but URL-encodes each substituted value.
