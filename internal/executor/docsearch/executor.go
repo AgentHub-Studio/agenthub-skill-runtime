@@ -95,7 +95,7 @@ func (e *DocumentSearchToolExecutor) searchChunks(
 	threshold float64,
 	topK int,
 ) ([]searchResult, error) {
-	schema := "ah_" + tenantID
+	schema := executor.TenantSchema(tenantID)
 
 	// pgvector expects the embedding as a vector literal: '[0.1,0.2,...]'
 	vectorLiteral := float32SliceToVector(embedding)

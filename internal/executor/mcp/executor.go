@@ -144,7 +144,7 @@ func (e *MCPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCont
 
 // fetchServerConfig loads the MCP server configuration from the tenant schema.
 func (e *MCPToolExecutor) fetchServerConfig(ctx context.Context, tenantID, serverConfigID string) (*mcpServerConfig, error) {
-	schema := "ah_" + tenantID
+	schema := executor.TenantSchema(tenantID)
 	query := fmt.Sprintf(
 		`SELECT transport_type, COALESCE(http_base_url, '') FROM %s.mcp_server_config WHERE id = $1`,
 		schema,

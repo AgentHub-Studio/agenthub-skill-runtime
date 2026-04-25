@@ -79,7 +79,8 @@ func TestSQLExecutor_UnsupportedDatasourceType_IsDocumented(t *testing.T) {
 // TestSQLExecutor_RenderInputTemplate_IsDocumented describes {{input.key}} substitution.
 //
 // Wire contract: "SELECT * FROM users WHERE name = '{{input.name}}'" with
-// Input{"name": "Alice"} produces "SELECT * FROM users WHERE name = 'Alice'".
+// Input{"name": "Alice"} is executed as "SELECT * FROM users WHERE name = $1"
+// with "Alice" passed as a pgx argument.
 func TestSQLExecutor_RenderInputTemplate_IsDocumented(t *testing.T) {
-	t.Log("renderInputTemplate: {{input.key}} placeholders are replaced with Input[key] before execution.")
+	t.Log("renderInputTemplate: {{input.key}} placeholders are converted to pgx parameters before execution.")
 }

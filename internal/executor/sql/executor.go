@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -77,19 +81,18 @@ func (e *SQLToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCont
 		return nil, fmt.Errorf("sql executor: unsupported datasource type %q (only POSTGRESQL is supported)", ds.Type)
 	}
 
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s", ds.DBUser, ds.DBPassword, ds.Host, ds.Port, ds.Database)
+	dsn := datasourceDSN(ds)
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sql executor: connect to datasource: %w", err)
 	}
 	defer conn.Close(ctx)
 
-	// Render any {{input.field}} placeholders in the query.
-	renderedQuery := renderInputTemplate(cfg.Query, ec.Input)
+	renderedQuery, args := renderInputTemplate(cfg.Query, ec.Input)
 
 	operation := strings.ToUpper(cfg.Operation)
 	if operation == "" || operation == "SELECT" {
-		rows, err := conn.Query(ctx, renderedQuery)
+		rows, err := conn.Query(ctx, renderedQuery, args...)
 		if err != nil {
 			return nil, fmt.Errorf("sql executor: query error: %w", err)
 		}
@@ -104,7 +107,7 @@ func (e *SQLToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCont
 	}
 
 	// INSERT / UPDATE / DELETE
-	tag, err := conn.Exec(ctx, renderedQuery)
+	tag, err := conn.Exec(ctx, renderedQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sql executor: exec error: %w", err)
 	}
@@ -114,7 +117,7 @@ func (e *SQLToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCont
 
 // fetchDatasource loads the datasource credentials from ah_{tenantID}.data_source.
 func (e *SQLToolExecutor) fetchDatasource(ctx context.Context, tenantID, datasourceID string) (*datasourceConfig, error) {
-	schema := "ah_" + tenantID
+	schema := executor.TenantSchema(tenantID)
 	query := fmt.Sprintf(
 		`SELECT host, port, database, db_user, db_password, type FROM %s.data_source WHERE id = $1`,
 		schema,
@@ -126,6 +129,16 @@ func (e *SQLToolExecutor) fetchDatasource(ctx context.Context, tenantID, datasou
 		return nil, fmt.Errorf("datasource %q not found in tenant %q: %w", datasourceID, tenantID, err)
 	}
 	return &ds, nil
+}
+
+func datasourceDSN(ds *datasourceConfig) string {
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(ds.DBUser, ds.DBPassword),
+		Host:   net.JoinHostPort(ds.Host, strconv.Itoa(ds.Port)),
+		Path:   ds.Database,
+	}
+	return u.String()
 }
 
 // collectRows reads up to maxRows from pgx.Rows and returns them as a slice of maps.
@@ -163,11 +176,39 @@ func parseSQLConfig(raw map[string]any) (*sqlConfig, error) {
 	return &cfg, nil
 }
 
-// renderInputTemplate replaces {{input.key}} placeholders with values from input.
-func renderInputTemplate(tmpl string, input map[string]any) string {
-	pairs := make([]string, 0, len(input)*2)
-	for k, v := range input {
-		pairs = append(pairs, fmt.Sprintf("{{input.%s}}", k), fmt.Sprintf("%v", v))
+var (
+	inputPlaceholderRE = regexp.MustCompile(`'?\{\{input\.([A-Za-z0-9_]+)\}\}'?`)
+	sqlParamRE         = regexp.MustCompile(`\$([1-9][0-9]*)`)
+)
+
+// renderInputTemplate replaces {{input.key}} placeholders with pgx parameters.
+func renderInputTemplate(tmpl string, input map[string]any) (string, []any) {
+	args := make([]any, 0)
+	nextParam := maxSQLParamIndex(tmpl)
+
+	rendered := inputPlaceholderRE.ReplaceAllStringFunc(tmpl, func(match string) string {
+		parts := inputPlaceholderRE.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		args = append(args, input[parts[1]])
+		nextParam++
+		return "$" + strconv.Itoa(nextParam)
+	})
+
+	return rendered, args
+}
+
+func maxSQLParamIndex(query string) int {
+	max := 0
+	for _, match := range sqlParamRE.FindAllStringSubmatch(query, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		n, err := strconv.Atoi(match[1])
+		if err == nil && n > max {
+			max = n
+		}
 	}
-	return strings.NewReplacer(pairs...).Replace(tmpl)
+	return max
 }

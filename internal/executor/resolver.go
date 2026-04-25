@@ -36,7 +36,7 @@ func NewSkillResolver(pool *pgxpool.Pool) *SkillResolver {
 // Fallback: if no skill with that slug exists in the tenant schema, looks up the
 // slug directly in ah_core.tool (platform tools like agenthub_list_skills).
 func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug string) (*Tool, error) {
-	schema := "ah_" + tenantID
+	schema := TenantSchema(tenantID)
 	query := fmt.Sprintf(`
 		SELECT t.id, t.type, t.config
 		FROM %s.skill s
@@ -66,7 +66,7 @@ func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug st
 
 // ResolveTool returns a Tool by its ID in the given tenant schema.
 func (r *SkillResolver) ResolveTool(ctx context.Context, tenantID, toolID string) (*Tool, error) {
-	schema := "ah_" + tenantID
+	schema := TenantSchema(tenantID)
 	query := fmt.Sprintf(`SELECT id, type, config FROM %s.tool WHERE id = $1`, schema)
 
 	var tool Tool
