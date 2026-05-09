@@ -16,14 +16,23 @@ import (
 //   - knowledge_base_id: string (UUID)
 //   - top_k: int (default 5)
 //   - similarity_threshold: float64 (default 0.7)
-//   - embedding_url: string (URL of the agenthub-embedding service)
+//   - embedding_url: string (URL of the agenthub-embedding service; falls
+//     back to the executor's defaultEmbeddingURL when unset — bug 219)
 type DocumentSearchToolExecutor struct {
-	pool *pgxpool.Pool
+	pool                 *pgxpool.Pool
+	defaultEmbeddingURL  string
 }
 
 // NewDocumentSearchToolExecutor creates a DocumentSearchToolExecutor backed by pool.
 func NewDocumentSearchToolExecutor(pool *pgxpool.Pool) *DocumentSearchToolExecutor {
 	return &DocumentSearchToolExecutor{pool: pool}
+}
+
+// WithDefaultEmbeddingURL sets the fallback embedding service URL used when
+// the per-tool config does not provide one (bug 219).
+func (e *DocumentSearchToolExecutor) WithDefaultEmbeddingURL(url string) *DocumentSearchToolExecutor {
+	e.defaultEmbeddingURL = url
+	return e
 }
 
 // GetToolType returns the tool type identifier.
@@ -54,6 +63,10 @@ func (e *DocumentSearchToolExecutor) Execute(ctx context.Context, ec executor.Ex
 
 	if cfg.KnowledgeBaseID == "" {
 		return nil, fmt.Errorf("docsearch executor: knowledge_base_id is required")
+	}
+	if cfg.EmbeddingURL == "" {
+		// Bug 219: fallback para o EMBEDDING_URL injetado no servidor.
+		cfg.EmbeddingURL = e.defaultEmbeddingURL
 	}
 	if cfg.EmbeddingURL == "" {
 		return nil, fmt.Errorf("docsearch executor: embedding_url is required")
@@ -149,6 +162,11 @@ func float32SliceToVector(v []float32) string {
 }
 
 // parseDocSearchConfig decodes the executor config map.
+//
+// Bug 218: aceita tanto snake_case (knowledge_base_id, top_k,
+// similarity_threshold, embedding_url) quanto camelCase (kbId, topK,
+// similarityThreshold, embeddingUrl) — frontend e backend Java usavam
+// camelCase enquanto este executor sempre exigiu snake_case.
 func parseDocSearchConfig(raw map[string]any) (*docSearchConfig, error) {
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -157,6 +175,29 @@ func parseDocSearchConfig(raw map[string]any) (*docSearchConfig, error) {
 	var cfg docSearchConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+	// camelCase fallbacks (frontend/Java legacy)
+	if cfg.KnowledgeBaseID == "" {
+		if v, ok := raw["kbId"].(string); ok {
+			cfg.KnowledgeBaseID = v
+		}
+	}
+	if cfg.TopK == 0 {
+		if v, ok := raw["topK"].(float64); ok {
+			cfg.TopK = int(v)
+		} else if v, ok := raw["limit"].(float64); ok {
+			cfg.TopK = int(v)
+		}
+	}
+	if cfg.SimilarityThreshold == 0 {
+		if v, ok := raw["similarityThreshold"].(float64); ok {
+			cfg.SimilarityThreshold = v
+		}
+	}
+	if cfg.EmbeddingURL == "" {
+		if v, ok := raw["embeddingUrl"].(string); ok {
+			cfg.EmbeddingURL = v
+		}
 	}
 	return &cfg, nil
 }

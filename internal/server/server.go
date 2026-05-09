@@ -31,7 +31,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	reg := executor.NewRegistry()
 	reg.Register(exechttp.NewHTTPToolExecutor(cfg.BackendBaseURL))
 	reg.Register(sql.NewSQLToolExecutor(pool))
-	reg.Register(docsearch.NewDocumentSearchToolExecutor(pool))
+	reg.Register(docsearch.NewDocumentSearchToolExecutor(pool).WithDefaultEmbeddingURL(cfg.EmbeddingURL))
 	reg.Register(mcp.NewMCPToolExecutor(pool))
 	reg.Register(&script.ScriptToolExecutor{})
 
