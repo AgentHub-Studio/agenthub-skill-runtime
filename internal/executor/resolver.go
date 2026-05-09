@@ -33,8 +33,12 @@ func NewSkillResolver(pool *pgxpool.Pool) *SkillResolver {
 
 // ResolveSkill returns the bound Tool for a skill slug in the given tenant schema.
 // It follows the skill → skill_tool → tool chain.
-// Fallback: if no skill with that slug exists in the tenant schema, looks up the
-// slug directly in ah_core.tool (platform tools like agenthub_list_skills).
+//
+// Resolution order (bug 199 fix):
+//  1. tenant.skill.slug (primary — single-tool skill aggregator pattern)
+//  2. tenant.tool.slug (bug 199 — when skill has 2+ tools, the api exposes each
+//     tool by its own slug; ResolveSkill must find it directly in tool table)
+//  3. ah_core.tool.slug (platform tools like agenthub_list_skills)
 func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug string) (*Tool, error) {
 	schema := TenantSchema(tenantID)
 	query := fmt.Sprintf(`
@@ -50,6 +54,15 @@ func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug st
 	var tool Tool
 	row := r.pool.QueryRow(ctx, query, skillSlug)
 	if err := row.Scan(&tool.ID, &tool.Type, &tool.Config); err != nil {
+		// Bug 199: tool slug fallback within tenant schema. When skill has 2+
+		// tools, api exposes each tool by its slug; LLM picks one and the
+		// skill-runtime needs to resolve directly to that tool.
+		toolQuery := fmt.Sprintf(`SELECT id, type, config FROM %s.tool WHERE slug = $1`, schema)
+		toolRow := r.pool.QueryRow(ctx, toolQuery, skillSlug)
+		if toolErr := toolRow.Scan(&tool.ID, &tool.Type, &tool.Config); toolErr == nil {
+			return &tool, nil
+		}
+
 		// Fallback: try resolving as a platform tool from ah_core by slug.
 		// Core tools (e.g. agenthub_list_skills) are stored in ah_core.tool and
 		// exposed to the LLM by tool slug directly — there is no corresponding
