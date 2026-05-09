@@ -338,13 +338,16 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 }
 
 // renderTemplate replaces placeholders in tmpl with corresponding string values
-// from input. Supports three formats (matched in priority order to avoid
+// from input. Supports four formats (matched in priority order to avoid
 // partial substitution of double-brace templates):
 //   - {{key}}         — Handlebars/Mustache-style (most intuitive for users)
 //   - {key}           — single-brace format stored in the database
 //   - {{input.key}}   — explicit input-namespace format
+//   - {{args.key}}    — LLM tool-call args namespace (bug 197); matches the
+//     mental model when authoring tool configs from agent perspective
+//     (LLM tool_call.arguments are presented as `args` to the runtime).
 func renderTemplate(tmpl string, input map[string]any) string {
-	pairs := make([]string, 0, len(input)*6)
+	pairs := make([]string, 0, len(input)*8)
 	for k, v := range input {
 		val := fmt.Sprintf("%v", v)
 		// {{key}} must come BEFORE {key} so that double-brace templates are
@@ -354,6 +357,7 @@ func renderTemplate(tmpl string, input map[string]any) string {
 			fmt.Sprintf("{{%s}}", k), val,
 			fmt.Sprintf("{%s}", k), val,
 			fmt.Sprintf("{{input.%s}}", k), val,
+			fmt.Sprintf("{{args.%s}}", k), val,
 		)
 	}
 	return strings.NewReplacer(pairs...).Replace(tmpl)
@@ -436,14 +440,16 @@ func extractSchemaKeys(raw json.RawMessage) map[string]bool {
 // renderTemplateURL is like renderTemplate but URL-encodes each substituted value.
 // P-C285-1: prevents malformed URLs when input values contain spaces, &, =, +, etc.
 // Should be used only for URL rendering, NOT for body/header templates.
+// Bug 197: also supports {{args.key}} namespace (LLM tool-call args).
 func renderTemplateURL(tmpl string, input map[string]any) string {
-	pairs := make([]string, 0, len(input)*6)
+	pairs := make([]string, 0, len(input)*8)
 	for k, v := range input {
 		encoded := url.QueryEscape(fmt.Sprintf("%v", v))
 		pairs = append(pairs,
 			fmt.Sprintf("{{%s}}", k), encoded,
 			fmt.Sprintf("{%s}", k), encoded,
 			fmt.Sprintf("{{input.%s}}", k), encoded,
+			fmt.Sprintf("{{args.%s}}", k), encoded,
 		)
 	}
 	return strings.NewReplacer(pairs...).Replace(tmpl)
