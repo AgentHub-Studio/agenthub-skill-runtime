@@ -40,13 +40,19 @@ type Config struct {
 }
 
 // DefaultConfig returns sensible defaults with exponential backoff.
+//
+// Bug 220: per-attempt Timeout aumentado para 90s. Embedding model
+// intfloat/multilingual-e5-large em CPU leva ~22s por chamada; somado
+// ao pgvector search (~5s) o tempo total era 28s — perigosamente
+// próximo do limite de 30s. EOF intermitente entre agenthub-api e
+// skill-runtime quando o invoker cancelava o ctx mid-write.
 func DefaultConfig() Config {
 	return Config{
 		MaxRetries:              2,
 		RetryDelay:              200 * time.Millisecond,
 		RetryDelayMultiplier:    2.0,
 		MaxRetryDelay:           30 * time.Second,
-		Timeout:                 30 * time.Second,
+		Timeout:                 90 * time.Second,
 		CircuitBreakerThreshold: 5,
 	}
 }

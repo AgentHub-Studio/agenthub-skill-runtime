@@ -35,11 +35,16 @@ func main() {
 	srv := server.New(cfg, pool)
 
 	httpServer := &http.Server{
-		Addr:         ":" + cfg.ServerPort,
-		Handler:      srv,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:    ":" + cfg.ServerPort,
+		Handler: srv,
+		// Bug 220: WriteTimeout era 15s — limite hard que matava
+		// conexão durante DOCUMENT_SEARCH (embedding ~22s + pgvector
+		// ~5s = ~28s). Resultado: EOF no cliente apesar do handler
+		// retornar 200. Aumentado para 180s para acomodar tools
+		// CPU-bound (embedding, OCR, LLM-grading).
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 180 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	quit := make(chan os.Signal, 1)
