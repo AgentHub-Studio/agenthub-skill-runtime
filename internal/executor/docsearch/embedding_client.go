@@ -50,7 +50,7 @@ func (c *EmbeddingClient) Embed(ctx context.Context, text string) ([]float32, er
 	if err != nil {
 		return nil, fmt.Errorf("embedding client: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)

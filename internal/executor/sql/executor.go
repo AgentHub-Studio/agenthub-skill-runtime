@@ -86,7 +86,7 @@ func (e *SQLToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCont
 	if err != nil {
 		return nil, fmt.Errorf("sql executor: connect to datasource: %w", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	renderedQuery, args := renderInputTemplate(cfg.Query, ec.Input)
 

@@ -59,16 +59,16 @@ func (e *HTTPToolExecutor) GetToolType() string { return "HTTP" }
 // "body" (simple alias). See parseHTTPConfig for the resolution order (P-C160-1/P-C236-1).
 // TimeoutSeconds, AuthType, AuthToken accept both camelCase and snake_case (BUG-TIMEOUT1 fix).
 type httpConfig struct {
-	URL             string            `json:"url"`
-	URLTemplate     string            `json:"urlTemplate"` // alias used by some tool configs
-	Method          string            `json:"method"`
-	Headers         map[string]string `json:"headers"`
-	BodyTemplate    string            // normalised — see parseHTTPConfig
-	TimeoutSeconds  int               // merged from timeoutSeconds (camelCase) and timeout_seconds (snake_case)
-	AuthType        string            // merged from authType (camelCase) and auth_type (snake_case)
-	AuthToken       string            // merged from authToken (camelCase) and auth_token (snake_case)
-	UseCallerToken  bool              `json:"useCallerToken"`
-	BaseURL         string            `json:"baseUrl"` // optional base URL prefix
+	URL            string            `json:"url"`
+	URLTemplate    string            `json:"urlTemplate"` // alias used by some tool configs
+	Method         string            `json:"method"`
+	Headers        map[string]string `json:"headers"`
+	BodyTemplate   string            // normalised — see parseHTTPConfig
+	TimeoutSeconds int               // merged from timeoutSeconds (camelCase) and timeout_seconds (snake_case)
+	AuthType       string            // merged from authType (camelCase) and auth_type (snake_case)
+	AuthToken      string            // merged from authToken (camelCase) and auth_token (snake_case)
+	UseCallerToken bool              `json:"useCallerToken"`
+	BaseURL        string            `json:"baseUrl"` // optional base URL prefix
 	// AllowedInputKeys is the set of property names declared in the tool's
 	// inputSchema.properties. When non-empty, appendUnusedInputAsQuery only
 	// forwards keys that belong to this set — preventing LLM-hallucinated
@@ -179,7 +179,7 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 	if err != nil {
 		return nil, fmt.Errorf("http executor: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -235,24 +235,24 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	// values — some core tool configs store bodyTemplate as a JSON object for
 	// readability; we normalise them to a compact JSON string (P-KB2-1).
 	type rawHTTPConfig struct {
-		URL             string            `json:"url"`
-		URLTemplate     string            `json:"urlTemplate"`
-		Method          string            `json:"method"`
-		Headers         map[string]string `json:"headers"`
-		BodyTemplate    json.RawMessage   `json:"bodyTemplate"`    // camelCase (preferred)
-		BodyTemplateSC  json.RawMessage   `json:"body_template"`   // snake_case (legacy)
-		Body            json.RawMessage   `json:"body"`            // simple alias
+		URL            string            `json:"url"`
+		URLTemplate    string            `json:"urlTemplate"`
+		Method         string            `json:"method"`
+		Headers        map[string]string `json:"headers"`
+		BodyTemplate   json.RawMessage   `json:"bodyTemplate"`  // camelCase (preferred)
+		BodyTemplateSC json.RawMessage   `json:"body_template"` // snake_case (legacy)
+		Body           json.RawMessage   `json:"body"`          // simple alias
 		// BUG-TIMEOUT1: accept both camelCase (API convention) and snake_case (legacy).
 		// Prefer camelCase; snake_case values are merged after unmarshaling.
-		TimeoutSeconds    int    `json:"timeoutSeconds"`   // camelCase (preferred)
-		TimeoutSecondsSC  int    `json:"timeout_seconds"`  // snake_case (legacy)
-		TimeoutMs         int    `json:"timeoutMs"`        // milliseconds (frontend/API convention)
-		AuthType          string `json:"authType"`         // camelCase (preferred)
-		AuthTypeSC        string `json:"auth_type"`        // snake_case (legacy)
-		AuthToken         string `json:"authToken"`        // camelCase (preferred)
-		AuthTokenSC       string `json:"auth_token"`       // snake_case (legacy)
-		UseCallerToken  bool              `json:"useCallerToken"`
-		BaseURL         string            `json:"baseUrl"`
+		TimeoutSeconds   int    `json:"timeoutSeconds"`  // camelCase (preferred)
+		TimeoutSecondsSC int    `json:"timeout_seconds"` // snake_case (legacy)
+		TimeoutMs        int    `json:"timeoutMs"`       // milliseconds (frontend/API convention)
+		AuthType         string `json:"authType"`        // camelCase (preferred)
+		AuthTypeSC       string `json:"auth_type"`       // snake_case (legacy)
+		AuthToken        string `json:"authToken"`       // camelCase (preferred)
+		AuthTokenSC      string `json:"auth_token"`      // snake_case (legacy)
+		UseCallerToken   bool   `json:"useCallerToken"`
+		BaseURL          string `json:"baseUrl"`
 		// InputSchema mirrors the JSON Schema that ships with every tool config.
 		// We only care about the "properties" map here — its keys define which
 		// LLM-supplied inputs are legitimate args. Keys NOT listed there are

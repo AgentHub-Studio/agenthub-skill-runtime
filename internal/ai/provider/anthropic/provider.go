@@ -76,7 +76,7 @@ type toolUseContent struct {
 
 // toolResultContent is the tool result block sent back by the caller.
 type toolResultContent struct {
-	Type      string `json:"type"`       // "tool_result"
+	Type      string `json:"type"` // "tool_result"
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 }
@@ -88,11 +88,11 @@ type tool struct {
 }
 
 type messagesResponse struct {
-	ID           string           `json:"id"`
-	Model        string           `json:"model"`
-	Content      []contentBlock   `json:"content"`
-	StopReason   string           `json:"stop_reason"` // end_turn, tool_use, max_tokens
-	Usage        anthropicUsage   `json:"usage"`
+	ID         string         `json:"id"`
+	Model      string         `json:"model"`
+	Content    []contentBlock `json:"content"`
+	StopReason string         `json:"stop_reason"` // end_turn, tool_use, max_tokens
+	Usage      anthropicUsage `json:"usage"`
 }
 
 type contentBlock struct {
@@ -148,7 +148,7 @@ func (p *Provider) Chat(ctx context.Context, messages []ai.Message, opts ai.Chat
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, p.parseError(resp)
@@ -188,14 +188,14 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, p.parseError(resp)
 	}
 
 	ch := make(chan ai.StreamChunk, 32)
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {

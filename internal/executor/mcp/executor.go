@@ -119,7 +119,7 @@ func (e *MCPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCont
 	if err != nil {
 		return nil, fmt.Errorf("mcp executor: HTTP request failed: %w", err)
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	rawBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {

@@ -281,9 +281,7 @@ func TestHTTPExecutor_CamelCaseTimeout(t *testing.T) {
 // (snake_case) is still accepted after the BUG-TIMEOUT1 fix.
 func TestHTTPExecutor_SnakeCaseTimeoutStillWorks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		}
+		<-r.Context().Done()
 	}))
 	defer srv.Close()
 
