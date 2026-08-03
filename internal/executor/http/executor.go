@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,7 +26,7 @@ import (
 //   - timeout_seconds: int (default 30)
 //   - auth_type: string (none, bearer, basic)
 //   - auth_token: string (static token for bearer/basic)
-//   - useCallerToken: bool (forward the caller's JWT as Authorization: Bearer)
+//   - useCallerToken / use_caller_token: bool (forward the caller's JWT as Authorization: Bearer)
 type HTTPToolExecutor struct {
 	// backendBaseURL is prepended to relative URLs (starting with /).
 	// URLs that begin with backendBaseURL are trusted (platform-configured) and
@@ -35,18 +37,31 @@ type HTTPToolExecutor struct {
 	// When nil, ValidateURL (the production SSRF guard) is used.
 	// Override for testing via WithURLValidator.
 	urlValidator func(string) error
+	resolveHost  func(context.Context, string) ([]net.IPAddr, error)
+	dialContext  func(context.Context, string, string) (net.Conn, error)
+	// unsafeTestEgress is set only by WithURLValidator so existing component
+	// tests can exercise local httptest servers. Production construction never
+	// enables it and always uses the protected transport below.
+	unsafeTestEgress bool
 }
 
 // NewHTTPToolExecutor creates an HTTPToolExecutor with the given backend base URL.
 // The base URL is used for relative tool URLs (e.g. /api/skills → http://agenthub-api:8081/api/skills).
 func NewHTTPToolExecutor(backendBaseURL string) *HTTPToolExecutor {
-	return &HTTPToolExecutor{backendBaseURL: backendBaseURL}
+	dialer := &net.Dialer{}
+	return &HTTPToolExecutor{
+		backendBaseURL: backendBaseURL,
+		resolveHost:    net.DefaultResolver.LookupIPAddr,
+		dialContext:    dialer.DialContext,
+	}
 }
 
-// WithURLValidator overrides the SSRF URL validator. Intended for testing only.
-// Pass nil to restore the default production ValidateURL guard.
+// WithURLValidator overrides the SSRF URL validator and protected transport.
+// It exists only for component tests that use local httptest servers. Pass nil
+// to restore the default production guards.
 func (e *HTTPToolExecutor) WithURLValidator(fn func(string) error) *HTTPToolExecutor {
 	e.urlValidator = fn
+	e.unsafeTestEgress = fn != nil
 	return e
 }
 
@@ -59,16 +74,16 @@ func (e *HTTPToolExecutor) GetToolType() string { return "HTTP" }
 // "body" (simple alias). See parseHTTPConfig for the resolution order (P-C160-1/P-C236-1).
 // TimeoutSeconds, AuthType, AuthToken accept both camelCase and snake_case (BUG-TIMEOUT1 fix).
 type httpConfig struct {
-	URL             string            `json:"url"`
-	URLTemplate     string            `json:"urlTemplate"` // alias used by some tool configs
-	Method          string            `json:"method"`
-	Headers         map[string]string `json:"headers"`
-	BodyTemplate    string            // normalised — see parseHTTPConfig
-	TimeoutSeconds  int               // merged from timeoutSeconds (camelCase) and timeout_seconds (snake_case)
-	AuthType        string            // merged from authType (camelCase) and auth_type (snake_case)
-	AuthToken       string            // merged from authToken (camelCase) and auth_token (snake_case)
-	UseCallerToken  bool              `json:"useCallerToken"`
-	BaseURL         string            `json:"baseUrl"` // optional base URL prefix
+	URL            string            `json:"url"`
+	URLTemplate    string            `json:"urlTemplate"` // alias used by some tool configs
+	Method         string            `json:"method"`
+	Headers        map[string]string `json:"headers"`
+	BodyTemplate   string            // normalised — see parseHTTPConfig
+	TimeoutSeconds int               // merged from timeoutSeconds (camelCase) and timeout_seconds (snake_case)
+	AuthType       string            // merged from authType (camelCase) and auth_type (snake_case)
+	AuthToken      string            // merged from authToken (camelCase) and auth_token (snake_case)
+	UseCallerToken bool              // merged from useCallerToken (camelCase) and use_caller_token (snake_case)
+	BaseURL        string            `json:"baseUrl"` // optional base URL prefix
 	// AllowedInputKeys is the set of property names declared in the tool's
 	// inputSchema.properties. When non-empty, appendUnusedInputAsQuery only
 	// forwards keys that belong to this set — preventing LLM-hallucinated
@@ -105,9 +120,16 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 		}
 	}
 
-	method := strings.ToUpper(cfg.Method)
+	method := strings.ToUpper(strings.TrimSpace(cfg.Method))
 	if method == "" {
 		method = http.MethodGet
+	}
+	if !isSupportedHTTPMethod(method) {
+		return nil, fmt.Errorf("http executor: method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS (got %q)", cfg.Method)
+	}
+	authType, err := normalizeHTTPAuthType(cfg.AuthType)
+	if err != nil {
+		return nil, fmt.Errorf("http executor: %w", err)
 	}
 
 	renderedURL := renderTemplateURL(rawURL, ec.Input)
@@ -118,6 +140,10 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 	// but the LLM provides city=Tokyo, the parameter is forwarded as ?city=Tokyo.
 	if method == http.MethodGet || method == http.MethodDelete || method == http.MethodHead {
 		renderedURL = appendUnusedInputAsQuery(rawURL, renderedURL, ec.Input, cfg.AllowedInputKeys)
+	}
+
+	if containsUnsafeURLPathToken(renderedURL) {
+		return nil, fmt.Errorf("http executor: path traversal blocked in URL")
 	}
 
 	// P-C220-1 / P-C221-1: reject SSRF attempts before sending any request.
@@ -168,18 +194,18 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 	switch {
 	case cfg.UseCallerToken && ec.CallerToken != "":
 		req.Header.Set("Authorization", "Bearer "+ec.CallerToken)
-	case strings.EqualFold(cfg.AuthType, "bearer") && cfg.AuthToken != "":
+	case authType == "bearer" && cfg.AuthToken != "":
 		req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
-	case strings.EqualFold(cfg.AuthType, "basic") && cfg.AuthToken != "":
+	case authType == "basic" && cfg.AuthToken != "":
 		req.Header.Set("Authorization", "Basic "+cfg.AuthToken)
 	}
 
-	client := &http.Client{}
+	client := e.newHTTPClient(trustedBase)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http executor: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -218,6 +244,163 @@ func (e *HTTPToolExecutor) Execute(ctx context.Context, ec executor.ExecutionCon
 	return &executor.Result{Output: output}, nil
 }
 
+func (e *HTTPToolExecutor) newHTTPClient(trustedBase string) *http.Client {
+	if e.unsafeTestEgress {
+		return &http.Client{}
+	}
+
+	trustedAddress := trustedBackendAddress(trustedBase)
+	transport := &http.Transport{
+		// Proxy environment variables would create an unvalidated egress path.
+		// HTTP tools therefore dial the validated destination directly.
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return e.dialOutbound(ctx, network, address, trustedAddress)
+		},
+	}
+
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("http executor: too many redirects")
+			}
+			if isTrustedBackendURL(req.URL.String(), trustedBase) {
+				return nil
+			}
+			if err := ValidateURL(req.URL.String()); err != nil {
+				return fmt.Errorf("http executor: redirect blocked (%w)", err)
+			}
+			return nil
+		},
+	}
+}
+
+func isTrustedBackendURL(rawURL, trustedBase string) bool {
+	trustedBase = strings.TrimRight(trustedBase, "/")
+	return trustedBase != "" && (rawURL == trustedBase || strings.HasPrefix(rawURL, trustedBase+"/"))
+}
+
+func trustedBackendAddress(trustedBase string) string {
+	if trustedBase == "" {
+		return ""
+	}
+	u, err := url.Parse(trustedBase)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		if strings.EqualFold(u.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(normalizeHost(u.Hostname()), port)
+}
+
+// dialOutbound resolves each non-trusted host exactly once, rejects private or
+// reserved targets, and dials the selected IP directly. This avoids DNS
+// rebinding between ValidateURL and http.Transport's later connection attempt.
+func (e *HTTPToolExecutor) dialOutbound(ctx context.Context, network, address, trustedAddress string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("http executor: invalid outbound address: %w", err)
+	}
+	if strings.EqualFold(net.JoinHostPort(normalizeHost(host), port), trustedAddress) {
+		return e.dialContext(ctx, network, address)
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedOutboundIP(ip) {
+			return nil, fmt.Errorf("http executor: outbound target is blocked: %s", ip)
+		}
+		return e.dialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+
+	addresses, err := e.resolveHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("http executor: resolve outbound host %q: %w", host, err)
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("http executor: outbound host %q resolved without addresses", host)
+	}
+	for _, resolved := range addresses {
+		if isBlockedOutboundIP(resolved.IP) {
+			return nil, fmt.Errorf("http executor: outbound host %q resolves to blocked address %s", host, resolved.IP)
+		}
+	}
+
+	return e.dialContext(ctx, network, net.JoinHostPort(addresses[0].IP.String(), port))
+}
+
+func isBlockedOutboundIP(ip net.IP) bool {
+	return IsBlockedOutboundIP(ip)
+}
+
+func normalizeHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+func isSupportedHTTPMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeHTTPAuthType(authType string) (string, error) {
+	if authType == "" {
+		return "none", nil
+	}
+	if strings.TrimSpace(authType) != authType {
+		return "", fmt.Errorf("authType must be one of none, bearer, basic (got %q)", authType)
+	}
+	authType = strings.ToLower(authType)
+	switch authType {
+	case "none", "bearer", "basic":
+		return authType, nil
+	default:
+		return "", fmt.Errorf("authType must be one of none, bearer, basic (got %q)", authType)
+	}
+}
+
+func containsUnsafeURLPathToken(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return containsUnsafePathToken(raw)
+	}
+
+	for _, candidate := range []string{u.EscapedPath(), u.RawPath, u.Path} {
+		if containsUnsafePathToken(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsUnsafePathToken(path string) bool {
+	candidate := strings.TrimSpace(path)
+	for i := 0; i < 3; i++ {
+		lower := strings.ToLower(candidate)
+		if strings.Contains(lower, "../") ||
+			strings.Contains(lower, `..\`) ||
+			strings.Contains(lower, "%2f") ||
+			strings.Contains(lower, "%5c") {
+			return true
+		}
+		decoded, err := url.PathUnescape(candidate)
+		if err != nil || decoded == candidate {
+			break
+		}
+		candidate = decoded
+	}
+	return false
+}
+
 // parseHTTPConfig decodes the executor config map into an httpConfig struct.
 // It resolves BodyTemplate from three possible field names with the following
 // priority: "bodyTemplate" (camelCase) > "body_template" (snake_case) > "body".
@@ -228,6 +411,9 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
+	if err := validateHTTPConfigAliasContract(raw); err != nil {
+		return nil, err
+	}
 
 	// rawHTTPConfig mirrors httpConfig but exposes all three body field aliases
 	// so we can apply priority logic after unmarshaling.
@@ -235,24 +421,25 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	// values — some core tool configs store bodyTemplate as a JSON object for
 	// readability; we normalise them to a compact JSON string (P-KB2-1).
 	type rawHTTPConfig struct {
-		URL             string            `json:"url"`
-		URLTemplate     string            `json:"urlTemplate"`
-		Method          string            `json:"method"`
-		Headers         map[string]string `json:"headers"`
-		BodyTemplate    json.RawMessage   `json:"bodyTemplate"`    // camelCase (preferred)
-		BodyTemplateSC  json.RawMessage   `json:"body_template"`   // snake_case (legacy)
-		Body            json.RawMessage   `json:"body"`            // simple alias
+		URL            string            `json:"url"`
+		URLTemplate    string            `json:"urlTemplate"`
+		Method         string            `json:"method"`
+		Headers        map[string]string `json:"headers"`
+		BodyTemplate   json.RawMessage   `json:"bodyTemplate"`  // camelCase (preferred)
+		BodyTemplateSC json.RawMessage   `json:"body_template"` // snake_case (legacy)
+		Body           json.RawMessage   `json:"body"`          // simple alias
 		// BUG-TIMEOUT1: accept both camelCase (API convention) and snake_case (legacy).
 		// Prefer camelCase; snake_case values are merged after unmarshaling.
-		TimeoutSeconds    int    `json:"timeoutSeconds"`   // camelCase (preferred)
-		TimeoutSecondsSC  int    `json:"timeout_seconds"`  // snake_case (legacy)
-		TimeoutMs         int    `json:"timeoutMs"`        // milliseconds (frontend/API convention)
-		AuthType          string `json:"authType"`         // camelCase (preferred)
-		AuthTypeSC        string `json:"auth_type"`        // snake_case (legacy)
-		AuthToken         string `json:"authToken"`        // camelCase (preferred)
-		AuthTokenSC       string `json:"auth_token"`       // snake_case (legacy)
-		UseCallerToken  bool              `json:"useCallerToken"`
-		BaseURL         string            `json:"baseUrl"`
+		TimeoutSeconds   int    `json:"timeoutSeconds"`  // camelCase (preferred)
+		TimeoutSecondsSC int    `json:"timeout_seconds"` // snake_case (legacy)
+		TimeoutMs        int    `json:"timeoutMs"`       // milliseconds (frontend/API convention)
+		AuthType         string `json:"authType"`        // camelCase (preferred)
+		AuthTypeSC       string `json:"auth_type"`       // snake_case (legacy)
+		AuthToken        string `json:"authToken"`       // camelCase (preferred)
+		AuthTokenSC      string `json:"auth_token"`      // snake_case (legacy)
+		UseCallerToken   *bool  `json:"useCallerToken"`
+		UseCallerTokenSC *bool  `json:"use_caller_token"`
+		BaseURL          string `json:"baseUrl"`
 		// InputSchema mirrors the JSON Schema that ships with every tool config.
 		// We only care about the "properties" map here — its keys define which
 		// LLM-supplied inputs are legitimate args. Keys NOT listed there are
@@ -287,6 +474,12 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	if authToken == "" {
 		authToken = r.AuthTokenSC
 	}
+	useCallerToken := false
+	if r.UseCallerToken != nil {
+		useCallerToken = *r.UseCallerToken
+	} else if r.UseCallerTokenSC != nil {
+		useCallerToken = *r.UseCallerTokenSC
+	}
 
 	cfg := &httpConfig{
 		URL:              r.URL,
@@ -296,7 +489,7 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 		TimeoutSeconds:   timeoutSeconds,
 		AuthType:         authType,
 		AuthToken:        authToken,
-		UseCallerToken:   r.UseCallerToken,
+		UseCallerToken:   useCallerToken,
 		BaseURL:          r.BaseURL,
 		AllowedInputKeys: extractSchemaKeys(r.InputSchema),
 	}
@@ -335,6 +528,143 @@ func parseHTTPConfig(raw map[string]any) (*httpConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateHTTPConfigAliasContract keeps legacy HTTP aliases only when they
+// produce the same effective runtime value. This prevents old persisted
+// configs from making outbound requests with order-dependent semantics.
+func validateHTTPConfigAliasContract(raw map[string]any) error {
+	if err := validateHTTPStringAliases(raw, "url", "urlTemplate", func(value string) string { return value }); err != nil {
+		return err
+	}
+	if err := validateHTTPBodyAliases(raw); err != nil {
+		return err
+	}
+	if err := validateHTTPTimeoutAliases(raw); err != nil {
+		return err
+	}
+	if err := validateHTTPStringAliases(raw, "authType", "auth_type", strings.ToLower); err != nil {
+		return err
+	}
+	if err := validateHTTPStringAliases(raw, "authToken", "auth_token", func(value string) string { return value }); err != nil {
+		return err
+	}
+	if err := validateHTTPBoolAliases(raw, "useCallerToken", "use_caller_token"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateHTTPBodyAliases(raw map[string]any) error {
+	canonical := ""
+	canonicalField := ""
+	for _, key := range []string{"bodyTemplate", "body_template", "body"} {
+		value, ok := raw[key]
+		if !ok || value == nil {
+			continue
+		}
+		valueCanonical, err := canonicalHTTPBodyTemplate(value)
+		if err != nil {
+			return err
+		}
+		if canonicalField != "" && canonical != valueCanonical {
+			return conflictingHTTPAliasError(canonicalField, key)
+		}
+		canonical = valueCanonical
+		canonicalField = key
+	}
+	return nil
+}
+
+func canonicalHTTPBodyTemplate(value any) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("marshal HTTP body alias: %w", err)
+	}
+	if len(raw) > 0 && raw[0] == '"' {
+		var text string
+		if err := json.Unmarshal(raw, &text); err == nil {
+			raw = []byte(text)
+		}
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return string(raw), nil
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return string(raw), nil
+	}
+	return string(canonical), nil
+}
+
+func validateHTTPTimeoutAliases(raw map[string]any) error {
+	canonical := 0
+	canonicalField := ""
+	for _, field := range []struct {
+		key      string
+		toSecond func(int) int
+	}{
+		{key: "timeoutSeconds", toSecond: func(value int) int { return value }},
+		{key: "timeout_seconds", toSecond: func(value int) int { return value }},
+		{key: "timeoutMs", toSecond: func(value int) int { return (value + 999) / 1000 }},
+	} {
+		value, ok := positiveHTTPAliasInt(raw[field.key])
+		if !ok {
+			continue
+		}
+		value = field.toSecond(value)
+		if canonicalField != "" && canonical != value {
+			return conflictingHTTPAliasError(canonicalField, field.key)
+		}
+		canonical = value
+		canonicalField = field.key
+	}
+	return nil
+}
+
+func positiveHTTPAliasInt(value any) (int, bool) {
+	switch value := value.(type) {
+	case int:
+		return value, value > 0
+	case int64:
+		return int(value), value > 0
+	case float64:
+		if math.Trunc(value) != value || value <= 0 {
+			return 0, false
+		}
+		return int(value), true
+	case json.Number:
+		integer, err := value.Int64()
+		return int(integer), err == nil && integer > 0
+	default:
+		return 0, false
+	}
+}
+
+func validateHTTPStringAliases(raw map[string]any, camelKey, snakeKey string, normalize func(string) string) error {
+	camel, camelSet := raw[camelKey].(string)
+	snake, snakeSet := raw[snakeKey].(string)
+	if !camelSet || camel == "" || !snakeSet || snake == "" {
+		return nil
+	}
+	if normalize(camel) != normalize(snake) {
+		return conflictingHTTPAliasError(camelKey, snakeKey)
+	}
+	return nil
+}
+
+func validateHTTPBoolAliases(raw map[string]any, camelKey, snakeKey string) error {
+	camel, camelSet := raw[camelKey].(bool)
+	snake, snakeSet := raw[snakeKey].(bool)
+	if !camelSet || !snakeSet || camel == snake {
+		return nil
+	}
+	return conflictingHTTPAliasError(camelKey, snakeKey)
+}
+
+func conflictingHTTPAliasError(first, second string) error {
+	return fmt.Errorf("conflicting HTTP config aliases %s and %s", first, second)
 }
 
 // renderTemplate replaces placeholders in tmpl with corresponding string values
@@ -385,7 +715,8 @@ func appendUnusedInputAsQuery(rawTemplate, renderedURL string, input map[string]
 	for k := range input {
 		if strings.Contains(rawTemplate, "{"+k+"}") ||
 			strings.Contains(rawTemplate, "{{"+k+"}}") ||
-			strings.Contains(rawTemplate, "{{input."+k+"}}") {
+			strings.Contains(rawTemplate, "{{input."+k+"}}") ||
+			strings.Contains(rawTemplate, "{{args."+k+"}}") {
 			used[k] = true
 		}
 	}

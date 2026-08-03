@@ -40,13 +40,25 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// ValidateURL rejects URLs that target private/reserved address space or internal
-// cluster DNS names. Fail-closed: DNS resolution failure is treated as a block.
+// IsBlockedOutboundIP reports whether an address is unsafe as an egress target.
+// It is shared by MCP HTTP execution so all runtime HTTP paths enforce the same
+// private, reserved, multicast, and unspecified-address policy.
+func IsBlockedOutboundIP(ip net.IP) bool {
+	return ip == nil || isPrivateIP(ip) || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalMulticast()
+}
+
+// ValidateURL rejects URLs that statically target private/reserved address space
+// or internal cluster DNS names. DNS resolution and connection pinning are done
+// by HTTPToolExecutor's protected transport immediately before dialing.
 // P-C220-1: GET SSRF. P-C221-1: POST SSRF.
 func ValidateURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme: %s", u.Scheme)
 	}
 	if u.Host == "" {
 		return fmt.Errorf("URL has no host")
@@ -68,20 +80,5 @@ func ValidateURL(rawURL string) error {
 		return nil
 	}
 
-	// Resolve hostname and check each returned address.
-	// Fail-closed: unresolvable hosts are rejected.
-	addrs, err := net.LookupHost(host)
-	if err != nil {
-		return fmt.Errorf("DNS resolution failed for %s: %w", host, err)
-	}
-	for _, addr := range addrs {
-		ip := net.ParseIP(addr)
-		if ip == nil {
-			continue
-		}
-		if isPrivateIP(ip) {
-			return fmt.Errorf("URL targets private/internal network address %s (resolved from %s)", addr, host)
-		}
-	}
 	return nil
 }

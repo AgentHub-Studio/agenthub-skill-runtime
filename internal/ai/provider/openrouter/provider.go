@@ -45,13 +45,13 @@ func (p *Provider) GetProviderName() string { return "openrouter" }
 
 // chatRequest mirrors the OpenAI-compatible request body expected by OpenRouter.
 type chatRequest struct {
-	Model    string       `json:"model"`
-	Messages []ai.Message `json:"messages"`
-	Stream   bool         `json:"stream,omitempty"`
-	MaxTokens   int     `json:"max_tokens,omitempty"`
-	Temperature float64 `json:"temperature,omitempty"`
-	TopP        float64 `json:"top_p,omitempty"`
-	Tools    []ai.Tool `json:"tools,omitempty"`
+	Model       string       `json:"model"`
+	Messages    []ai.Message `json:"messages"`
+	Stream      bool         `json:"stream,omitempty"`
+	MaxTokens   int          `json:"max_tokens,omitempty"`
+	Temperature float64      `json:"temperature,omitempty"`
+	TopP        float64      `json:"top_p,omitempty"`
+	Tools       []ai.Tool    `json:"tools,omitempty"`
 }
 
 type chatChoice struct {
@@ -102,7 +102,7 @@ func (p *Provider) Chat(ctx context.Context, messages []ai.Message, opts ai.Chat
 	if err != nil {
 		return nil, fmt.Errorf("openrouter: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("openrouter: status %d", resp.StatusCode)
@@ -165,14 +165,14 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 	}
 
 	if resp.StatusCode >= 400 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("openrouter: stream status %d", resp.StatusCode)
 	}
 
 	ch := make(chan ai.StreamChunk, 32)
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {

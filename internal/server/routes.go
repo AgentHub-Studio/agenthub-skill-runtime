@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -21,28 +22,44 @@ func mountRoutes(r chi.Router, s *Server) {
 	r.Post("/api/tools/{toolId}/execute", s.handleExecuteTool)
 }
 
-// executeBody is the structured request body for skill/tool execution.
-type executeBody struct {
-	Input   map[string]any `json:"input"`
-	Context struct {
-		TenantID  string `json:"tenantId"`
-		AgentID   string `json:"agentId"`
-		SessionID string `json:"sessionId"`
-	} `json:"context"`
-}
-
 // parseExecuteBody decodes the request body. Supports both the structured
 // {"input": {...}, "context": {...}} envelope (from the agentic runner) and
 // a flat {"key": value, ...} map for direct tool calls.
 func parseExecuteBody(r *http.Request) (map[string]any, error) {
-	var body executeBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	var raw map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		return nil, err
 	}
-	if body.Input != nil {
-		return body.Input, nil
+	if isDirectToolExecuteRequest(r) {
+		return raw, nil
 	}
-	return map[string]any{}, nil
+	if input, ok := raw["input"]; ok {
+		if !hasRunnerExecuteContext(raw["context"]) {
+			return raw, nil
+		}
+		if input == nil {
+			return map[string]any{}, nil
+		}
+		inputMap, ok := input.(map[string]any)
+		if !ok {
+			return nil, errors.New("input must be an object")
+		}
+		return inputMap, nil
+	}
+	return raw, nil
+}
+
+func isDirectToolExecuteRequest(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/api/tools/") && strings.HasSuffix(r.URL.Path, "/execute")
+}
+
+func hasRunnerExecuteContext(value any) bool {
+	contextMap, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, hasTenantID := contextMap["tenantId"]
+	return hasTenantID
 }
 
 func (s *Server) handleExecuteSkill(w http.ResponseWriter, r *http.Request) {

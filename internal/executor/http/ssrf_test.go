@@ -66,6 +66,12 @@ func TestValidateURL_InvalidURL_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestValidateURL_UnsupportedScheme_Blocked(t *testing.T) {
+	err := ValidateURL("ftp://[2606:4700:4700::1111]/resource")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "scheme")
+}
+
 func TestValidateURL_EmptyHost_ReturnsError(t *testing.T) {
 	err := ValidateURL("http:///path")
 	require.Error(t, err)
@@ -75,4 +81,9 @@ func TestValidateURL_IPv6Loopback_Blocked(t *testing.T) {
 	err := ValidateURL("http://[::1]/api")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "private")
+}
+
+func TestValidateURL_PublicHostnameDoesNotResolveBeforeProtectedDial(t *testing.T) {
+	err := ValidateURL("https://unresolvable.example.invalid/resource")
+	require.NoError(t, err)
 }

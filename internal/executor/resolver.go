@@ -56,8 +56,17 @@ func (r *SkillResolver) ResolveSkill(ctx context.Context, tenantID, skillSlug st
 	if err := row.Scan(&tool.ID, &tool.Type, &tool.Config); err != nil {
 		// Bug 199: tool slug fallback within tenant schema. When skill has 2+
 		// tools, api exposes each tool by its slug; LLM picks one and the
-		// skill-runtime needs to resolve directly to that tool.
-		toolQuery := fmt.Sprintf(`SELECT id, type, config FROM %s.tool WHERE slug = $1`, schema)
+		// skill-runtime needs to resolve directly to that tool. Keep the same
+		// active binding boundary as the primary skill lookup so an orphaned or
+		// disabled tool cannot be executed by guessing its slug.
+		toolQuery := fmt.Sprintf(`
+			SELECT t.id, t.type, t.config
+			FROM %s.tool t
+			JOIN %s.skill_tool st ON st.tool_id = t.id AND st.is_active = true
+			WHERE t.slug = $1
+			ORDER BY st.priority, st.created_at
+			LIMIT 1
+		`, schema, schema)
 		toolRow := r.pool.QueryRow(ctx, toolQuery, skillSlug)
 		if toolErr := toolRow.Scan(&tool.ID, &tool.Type, &tool.Config); toolErr == nil {
 			return &tool, nil

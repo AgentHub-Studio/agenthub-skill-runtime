@@ -3,7 +3,6 @@ package http_test
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -70,6 +69,194 @@ func TestHTTPExecutor_POSTWithBodyTemplate(t *testing.T) {
 	assert.Equal(t, "Alice", received["name"])
 }
 
+func TestHTTPExecutor_RejectsConflictingConfigAliasesBeforeRequest(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{"unexpected":true}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	res, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":          srv.URL,
+			"method":       "POST",
+			"bodyTemplate": `{"source":"camel"}`,
+			"body":         `{"source":"legacy"}`,
+		},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, res)
+	assert.Contains(t, err.Error(), "bodyTemplate")
+	assert.False(t, called, "ambiguous configuration must fail before any outbound request")
+}
+
+func TestHTTPExecutor_RejectsConflictingURLAliasesBeforeRequest(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{"unexpected":true}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	res, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":         srv.URL,
+			"urlTemplate": "https://api.example.com/legacy",
+		},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, res)
+	assert.Contains(t, err.Error(), "url")
+	assert.Contains(t, err.Error(), "urlTemplate")
+	assert.False(t, called, "ambiguous configuration must fail before any outbound request")
+}
+
+func TestHTTPExecutor_AllowsEquivalentConfigAliases(t *testing.T) {
+	var received map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":              srv.URL,
+			"urlTemplate":      srv.URL,
+			"method":           "POST",
+			"bodyTemplate":     `{"source":"shared"}`,
+			"body":             map[string]any{"source": "shared"},
+			"timeoutSeconds":   2,
+			"timeoutMs":        1500,
+			"authType":         "Bearer",
+			"auth_type":        "bearer",
+			"authToken":        "configured-token",
+			"auth_token":       "configured-token",
+			"useCallerToken":   true,
+			"use_caller_token": true,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "shared", received["source"])
+}
+
+func TestHTTPExecutor_TrimsConfiguredMethod(t *testing.T) {
+	var gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		if gotMethod != http.MethodPost {
+			http.Error(w, "expected POST", http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	res, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":     srv.URL,
+			"method":  " post ",
+			"headers": map[string]any{"Accept": "application/json"},
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, res.Output["status_code"])
+	assert.Equal(t, http.MethodPost, gotMethod)
+}
+
+func TestHTTPExecutor_RejectsUnsupportedMethod(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{"unexpected":true}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	res, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":    srv.URL,
+			"method": "TRACE",
+		},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, res)
+	assert.Contains(t, err.Error(), "method must be one of")
+	assert.False(t, called, "unsupported method must fail before request")
+}
+
+func TestHTTPExecutor_RejectsUnsupportedURLScheme(t *testing.T) {
+	e := httpexec.NewHTTPToolExecutor("")
+
+	res, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"url":    "ftp://[2606:4700:4700::1111]/resource",
+			"method": "GET",
+		},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, res)
+	assert.Contains(t, err.Error(), "blocked URL")
+	assert.Contains(t, err.Error(), "scheme")
+}
+
+func TestHTTPExecutor_RejectsURLPathTraversalBeforeTrustedBackendRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]any
+		input  map[string]any
+	}{
+		{
+			name: "literal traversal in relative backend URL",
+			config: map[string]any{
+				"url":    "/api/files/../admin",
+				"method": "GET",
+			},
+		},
+		{
+			name: "encoded slash traversal rendered from placeholder",
+			config: map[string]any{
+				"urlTemplate": "/api/files/{{input.path}}",
+				"method":      "GET",
+			},
+			input: map[string]any{"path": "../secret"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				_, _ = w.Write([]byte(`{"unexpected":true}`))
+			}))
+			defer srv.Close()
+
+			e := httpexec.NewHTTPToolExecutor(srv.URL)
+			res, err := e.Execute(context.Background(), executor.ExecutionContext{
+				Config: tt.config,
+				Input:  tt.input,
+			})
+
+			require.Error(t, err)
+			assert.Nil(t, res)
+			assert.Contains(t, err.Error(), "path traversal")
+			assert.False(t, called, "path traversal must fail before trusted backend request")
+		})
+	}
+}
+
 func TestHTTPExecutor_URLTemplate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/users/42", r.URL.Path)
@@ -102,6 +289,83 @@ func TestHTTPExecutor_BearerAuth(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+}
+
+func TestHTTPExecutor_ForwardsCallerTokenWhenSnakeCaseConfigured(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if gotAuth != "Bearer caller-token-123" {
+			http.Error(w, "missing caller token", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	e := noSSRFExecutor()
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		CallerToken: "caller-token-123",
+		Config: map[string]any{
+			"url":              srv.URL,
+			"method":           "GET",
+			"use_caller_token": true,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer caller-token-123", gotAuth)
+}
+
+func TestHTTPExecutor_RejectsUnsupportedAuthType(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]any
+	}{
+		{
+			name: "camelCase unknown auth type",
+			config: map[string]any{
+				"authType":  "api_key",
+				"authToken": "secret-token",
+			},
+		},
+		{
+			name: "snake_case auth type with spaces",
+			config: map[string]any{
+				"auth_type":  " bearer ",
+				"auth_token": "secret-token",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				_, _ = w.Write([]byte(`{"unexpected":true}`))
+			}))
+			defer srv.Close()
+
+			config := map[string]any{
+				"url":    srv.URL,
+				"method": "GET",
+			}
+			for key, value := range tt.config {
+				config[key] = value
+			}
+
+			e := noSSRFExecutor()
+			res, err := e.Execute(context.Background(), executor.ExecutionContext{
+				Config: config,
+			})
+
+			require.Error(t, err)
+			assert.Nil(t, res)
+			assert.Contains(t, err.Error(), "authType must be one of")
+			assert.False(t, called, "unsupported authType must fail before request")
+		})
+	}
 }
 
 func TestHTTPExecutor_CustomHeader(t *testing.T) {
@@ -230,14 +494,11 @@ func TestHTTPExecutor_Body_Alias(t *testing.T) {
 	assert.Equal(t, "test", received["value"])
 }
 
-// TestHTTPExecutor_CamelCasePrecedesSnakeCase verifies that "bodyTemplate" takes
-// priority over "body_template" when both are present.
-func TestHTTPExecutor_CamelCasePrecedesSnakeCase(t *testing.T) {
-	var receivedBody []byte
+func TestHTTPExecutor_RejectsConflictingBodyTemplateAliasesBeforeRequest(t *testing.T) {
+	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedBody, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
+		called = true
+		_, _ = w.Write([]byte(`{"unexpected":true}`))
 	}))
 	defer srv.Close()
 
@@ -246,13 +507,13 @@ func TestHTTPExecutor_CamelCasePrecedesSnakeCase(t *testing.T) {
 		Config: map[string]any{
 			"url":           srv.URL,
 			"method":        "POST",
-			"bodyTemplate":  `{"source":"camel"}`, // camelCase wins
+			"bodyTemplate":  `{"source":"camel"}`,
 			"body_template": `{"source":"snake"}`,
 		},
 	})
-	require.NoError(t, err)
-	assert.Contains(t, string(receivedBody), "camel")
-	assert.NotContains(t, string(receivedBody), "snake")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bodyTemplate")
+	assert.False(t, called, "ambiguous configuration must fail before any outbound request")
 }
 
 // TestHTTPExecutor_CamelCaseTimeout verifies that "timeoutSeconds" (camelCase) is
@@ -281,9 +542,7 @@ func TestHTTPExecutor_CamelCaseTimeout(t *testing.T) {
 // (snake_case) is still accepted after the BUG-TIMEOUT1 fix.
 func TestHTTPExecutor_SnakeCaseTimeoutStillWorks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		}
+		<-r.Context().Done()
 	}))
 	defer srv.Close()
 

@@ -42,13 +42,13 @@ func (p *Provider) GetProviderName() string { return "openai" }
 // ---- internal request / response types ----
 
 type chatRequest struct {
-	Model       string      `json:"model"`
-	Messages    []message   `json:"messages"`
-	MaxTokens   int         `json:"max_tokens,omitempty"`
-	Temperature float64     `json:"temperature,omitempty"`
-	TopP        float64     `json:"top_p,omitempty"`
-	Tools       []tool      `json:"tools,omitempty"`
-	Stream      bool        `json:"stream,omitempty"`
+	Model       string    `json:"model"`
+	Messages    []message `json:"messages"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Temperature float64   `json:"temperature,omitempty"`
+	TopP        float64   `json:"top_p,omitempty"`
+	Tools       []tool    `json:"tools,omitempty"`
+	Stream      bool      `json:"stream,omitempty"`
 }
 
 type message struct {
@@ -101,9 +101,9 @@ type usage struct {
 
 // streamChoice represents one choice in a streaming SSE delta event.
 type streamChoice struct {
-	Index        int          `json:"index"`
-	Delta        streamDelta  `json:"delta"`
-	FinishReason *string      `json:"finish_reason"`
+	Index        int         `json:"index"`
+	Delta        streamDelta `json:"delta"`
+	FinishReason *string     `json:"finish_reason"`
 }
 
 type streamDelta struct {
@@ -137,7 +137,7 @@ func (p *Provider) Chat(ctx context.Context, messages []ai.Message, opts ai.Chat
 	if err != nil {
 		return nil, fmt.Errorf("openai: do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, p.parseError(resp)
@@ -174,14 +174,15 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, p.parseError(resp)
+		err := p.parseError(resp)
+		_ = resp.Body.Close()
+		return nil, err
 	}
 
 	ch := make(chan ai.StreamChunk, 32)
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {

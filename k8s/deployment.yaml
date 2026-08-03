@@ -14,10 +14,20 @@ spec:
       labels:
         app: agenthub-skill-runtime
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: skill-runtime
-          image: registry.cezar.dev/agenthub-skill-runtime:latest
-          imagePullPolicy: Always
+          image: registry.cezar.dev/agenthub-skill-runtime:1822c9253132
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
           ports:
             - containerPort: 8083
           env:

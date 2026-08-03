@@ -98,14 +98,6 @@ func TestMCPExecutor_JSONRPCErrorResponse_IsDocumented(t *testing.T) {
 	t.Log("MCPToolExecutor: JSON-RPC error response sets Result.Error, not a Go return error.")
 }
 
-// TestMCPExecutor_StdioTransportNotSupported documents the behavior for stdio transport.
-//
-// Wire contract: mcp_server_config.transport_type = 'stdio' →
-// Execute returns error containing "stdio transport not supported in runtime".
-func TestMCPExecutor_StdioTransportNotSupported_IsDocumented(t *testing.T) {
-	t.Log("MCPToolExecutor: transport_type='stdio' returns 'stdio transport not supported in runtime'.")
-}
-
 // TestMCPExecutor_MissingHTTPBaseURL documents the behavior when http_base_url is empty.
 //
 // Wire contract: transport_type='http' + empty http_base_url →
