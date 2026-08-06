@@ -68,6 +68,32 @@ func TestSQLExecutor_OnlyDatasourceID_MissingQuery(t *testing.T) {
 	assert.Contains(t, err.Error(), "query is required")
 }
 
+func TestSQLExecutor_RejectsConflictingDatasourceAliasesBeforeFetch(t *testing.T) {
+	e := sqlexec.NewSQLToolExecutor(nil)
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"datasource_id": "00000000-0000-0000-0000-000000000001",
+			"dataSourceId":  "00000000-0000-0000-0000-000000000002",
+			"query":         "SELECT 1",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "datasource_id")
+	assert.Contains(t, err.Error(), "dataSourceId")
+}
+
+func TestSQLExecutor_AcceptsEquivalentDatasourceAliases(t *testing.T) {
+	e := sqlexec.NewSQLToolExecutor(nil)
+	_, err := e.Execute(context.Background(), executor.ExecutionContext{
+		Config: map[string]any{
+			"datasource_id": "AAAAAAAA-0000-0000-0000-000000000001",
+			"dataSourceId":  "aaaaaaaa-0000-0000-0000-000000000001",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "query is required")
+}
+
 // TestSQLExecutor_UnsupportedDatasourceType documents the behavior when
 // a non-POSTGRESQL datasource is returned. Full integration requires Testcontainers.
 //

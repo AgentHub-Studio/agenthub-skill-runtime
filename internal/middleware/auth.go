@@ -5,9 +5,11 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -40,6 +42,9 @@ var (
 )
 
 const jwksCacheTTL = 5 * time.Minute
+const jwksFetchTimeout = 5 * time.Second
+
+var jwksHTTPClient = &http.Client{Timeout: jwksFetchTimeout}
 
 // jwksResponse represents a JSON Web Key Set from Keycloak.
 type jwksResponse struct {
@@ -63,8 +68,20 @@ func fetchJWKS(keycloakBaseURL, tenantID string) (map[string]*rsa.PublicKey, err
 		return entry.keys, nil
 	}
 
-	url := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", keycloakBaseURL, tenantID)
-	resp, err := http.Get(url) //nolint:gosec // URL is constructed from validated config
+	jwksURL, err := buildJWKSURL(keycloakBaseURL, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), jwksFetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("auth: create JWKS request for tenant %q: %w", tenantID, err)
+	}
+
+	resp, err := jwksHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("auth: fetch JWKS for tenant %q: %w", tenantID, err)
 	}
@@ -96,6 +113,49 @@ func fetchJWKS(keycloakBaseURL, tenantID string) (map[string]*rsa.PublicKey, err
 	jwksMu.Unlock()
 
 	return keys, nil
+}
+
+func buildJWKSURL(keycloakBaseURL, tenantID string) (*url.URL, error) {
+	if strings.TrimSpace(keycloakBaseURL) == "" {
+		return nil, errors.New("auth: keycloak base URL is empty")
+	}
+	if strings.ContainsAny(keycloakBaseURL, "\x00\r\n\t") {
+		return nil, errors.New("auth: keycloak base URL contains invalid control characters")
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, errors.New("auth: tenant ID is empty")
+	}
+	if strings.ContainsAny(tenantID, "\x00\r\n\t") {
+		return nil, errors.New("auth: tenant ID contains invalid control characters")
+	}
+
+	parsed, err := url.Parse(strings.TrimSpace(keycloakBaseURL))
+	if err != nil {
+		return nil, fmt.Errorf("auth: invalid keycloak base URL: %w", err)
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return nil, errors.New("auth: keycloak base URL must be absolute and include a host")
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return nil, fmt.Errorf("auth: keycloak base URL scheme %q is not allowed", parsed.Scheme)
+	}
+	if parsed.User != nil {
+		return nil, errors.New("auth: keycloak base URL must not contain user info")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("auth: keycloak base URL must not include query or fragment")
+	}
+
+	tenant := strings.TrimSpace(tenantID)
+	basePath := strings.TrimRight(parsed.Path, "/")
+	baseRawPath := strings.TrimRight(parsed.EscapedPath(), "/")
+	suffixPath := "/realms/" + tenant + "/protocol/openid-connect/certs"
+	suffixRawPath := "/realms/" + url.PathEscape(tenant) + "/protocol/openid-connect/certs"
+	parsed.Path = basePath + suffixPath
+	parsed.RawPath = baseRawPath + suffixRawPath
+	return parsed, nil
 }
 
 // parseRSAPublicKey builds an *rsa.PublicKey from base64url-encoded n and e.
